@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build / output
+dist/
+coverage/
+*.tsbuildinfo
+
+# Test artifacts
+test/.tmp/
+*.db
+*.db-wal
+*.db-shm
+*.tmp
+
+# Generated LTX test fixtures (produced at runtime)
+testdata/golden/*.ltx
+testdata/local/
+
+# Editor / OS
+.DS_Store
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.*
+!.env.example
