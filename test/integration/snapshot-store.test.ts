@@ -40,6 +40,7 @@ test('level-9 snapshot becomes the restore base', async () => {
     assert.equal(ic.integrity_check, 'ok');
     restored.close();
   } finally {
+    replica.close();
     t.close();
   }
 });

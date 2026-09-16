@@ -1,13 +1,16 @@
 /**
  * LocalDatabase is the internal engine that reads a SQLite database and its
- * `-wal` file directly from disk (no SQLite driver/connection) and writes LTX
- * files into a local cache (`<path>-litestream/ltx/`).
+ * `-wal` file and writes LTX files into a local cache (`<path>-litestream/ltx/`).
  *
  * It is deliberately NOT part of the public API: `Replica`/`Store` take a
- * database `path` and own the reading internally, so the library is agnostic to
- * whatever SQLite driver the application uses.
+ * database `path` and read directly, so the library is agnostic to whatever
+ * SQLite driver the application uses. To keep snapshots consistent, it holds a
+ * short-lived **read-only** `node:sqlite` read transaction that pins the WAL
+ * (SQLite will not checkpoint/truncate the WAL past an active reader), while
+ * reading the database + WAL files directly.
  */
 
+import { DatabaseSync } from 'node:sqlite';
 import { open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import nodePath from 'node:path';
 
@@ -38,15 +41,6 @@ function headerPageSize(buf: Uint8Array): number {
   return raw || 4096;
 }
 
-/** Reads the database size (pages) from the header (bytes 28-31). */
-function headerPageCount(buf: Uint8Array, pageSize: number): number {
-  if (buf.length >= 28) {
-    const n = (buf[28] << 24) | (buf[29] << 16) | (buf[30] << 8) | buf[31];
-    if (n > 0) return n;
-  }
-  return Math.floor(buf.length / pageSize);
-}
-
 /**
  * LocalDatabase reads a database + WAL from disk, tracks the local replicated
  * position, and builds LTX files in the local cache.
@@ -55,6 +49,7 @@ export class LocalDatabase {
   readonly path: string;
   readonly metaPath: string;
   readonly pageSize: number;
+  private conn: DatabaseSync | null = null;
 
   private constructor(path: string, metaPath: string, pageSize: number) {
     this.path = path;
@@ -64,8 +59,8 @@ export class LocalDatabase {
 
   /**
    * Open opens a local database reader for `path`. It does not create the
-   * database — the application is expected to own it. `pageSize` is read from
-   * the database header; a missing file falls back to the default page size.
+   * database — the application owns it. `pageSize` is read from the database
+   * header; a missing file falls back to the default page size.
    */
   static async open(path: string): Promise<LocalDatabase> {
     const metaPath = `${path}-litestream`;
@@ -141,108 +136,146 @@ export class LocalDatabase {
     return max;
   }
 
+  /**
+   * Opens (and caches) a read-only connection used to hold a snapshot during
+   * sync/snapshot. Not part of the public API; the DB file must exist.
+   */
+  private ensureConn(): DatabaseSync {
+    if (this.conn === null) {
+      this.conn = new DatabaseSync(this.path, { readOnly: true });
+      this.conn.exec('PRAGMA busy_timeout=5000');
+    }
+    return this.conn;
+  }
+
+  /** Pins a WAL snapshot by starting a read transaction and issuing a read. */
+  private beginRead(): void {
+    const conn = this.ensureConn();
+    conn.exec('BEGIN');
+    conn.prepare('SELECT 1').get();
+  }
+
+  /** Releases the pinned read snapshot. */
+  private commitRead(): void {
+    if (this.conn !== null) {
+      this.conn.exec('COMMIT');
+    }
+  }
+
+  /** Current committed database size, in pages (as seen by the pinned reader). */
+  private pageCount(): number {
+    const r = this.ensureConn().prepare('PRAGMA page_count').get() as { page_count: number };
+    return r.page_count;
+  }
+
   /** Sync builds a level-0 LTX file and writes it to the local cache. */
   async sync(): Promise<FileInfo | null> {
     const pos = await this.pos();
     const txID = pos + 1n;
-    const dbBuf = new Uint8Array(await readFile(this.path));
-    const commit = headerPageCount(dbBuf, this.pageSize);
-    if (commit === 0) return null;
 
-    const pageSize = this.pageSize;
-    const lockPg = lockPgno(pageSize);
+    this.beginRead();
+    try {
+      const commit = this.pageCount();
+      if (commit === 0) return null;
 
-    const walBuf = await this.readWalOrEmpty();
+      const pageSize = this.pageSize;
+      const lockPg = lockPgno(pageSize);
 
-    // Determine the previous sync state to resume incremental reading.
-    const prev = await this.prevSyncInfo();
-    let snapshotting = prev === null;
+      const dbBuf = new Uint8Array(await readFile(this.path));
+      const walBuf = await this.readWalOrEmpty();
 
-    let reader: WALReader | null = null;
-    let offset = WALHeaderSize;
-    let salt1 = 0;
-    let salt2 = 0;
-    let pageMap = new Map<number, number>();
-    let maxOffset = 0;
-    let walCommit = 0;
-    let prevCommit = 0;
+      // Determine the previous sync state to resume incremental reading.
+      const prev = await this.prevSyncInfo();
+      let snapshotting = prev === null;
 
-    if (!snapshotting && prev !== null) {
-      reader = makeResumeReader(walBuf, prev.walOffset + prev.walSize, prev.salt1, prev.salt2);
-      if (reader === null) {
-        snapshotting = true; // WAL was reset; fall back to a snapshot base
+      let reader: WALReader | null = null;
+      let offset = WALHeaderSize;
+      let salt1 = 0;
+      let salt2 = 0;
+      let pageMap = new Map<number, number>();
+      let maxOffset = 0;
+      let walCommit = 0;
+      let prevCommit = 0;
+
+      if (!snapshotting && prev !== null) {
+        reader = makeResumeReader(walBuf, prev.walOffset + prev.walSize, prev.salt1, prev.salt2);
+        if (reader === null) {
+          snapshotting = true; // WAL was reset; fall back to a snapshot base
+        } else {
+          const pm = reader.pageMap();
+          pageMap = pm.pageIndex;
+          maxOffset = pm.maxOffset;
+          walCommit = pm.commit;
+          offset = prev.walOffset + prev.walSize;
+          salt1 = prev.salt1;
+          salt2 = prev.salt2;
+          prevCommit = prev.commit;
+        }
+      }
+
+      const walSize = snapshotting ? 0 : maxOffset > 0 ? maxOffset - offset : 0;
+
+      if (!snapshotting && walSize === 0) {
+        return null; // no new WAL pages since the last sync
+      }
+
+      if (snapshotting) {
+        // Read the WAL from the start to build a full page map for the snapshot.
+        try {
+          const full = new WALReader(walBuf);
+          const pm = full.pageMap();
+          pageMap = pm.pageIndex;
+          walCommit = pm.commit;
+          salt1 = full.salt1();
+          salt2 = full.salt2();
+        } catch (err) {
+          if (!(err instanceof WALEOFError)) throw err;
+        }
+        if (walCommit > 0) {
+          offset = WALHeaderSize;
+        }
+      }
+
+      const finalCommit = Math.max(commit, walCommit);
+
+      // Encode the LTX file.
+      const sink = new BufferSink();
+      const enc = new Encoder(sink);
+      enc.encodeHeader({
+        version: 3,
+        flags: HeaderFlagNoChecksum,
+        pageSize,
+        commit: finalCommit,
+        minTXID: txID,
+        maxTXID: txID,
+        timestamp: BigInt(Date.now()),
+        preApplyChecksum: 0n,
+        walOffset: BigInt(offset),
+        walSize: BigInt(snapshotting ? Math.max(0, walBuf.length - WALHeaderSize) : walSize),
+        walSalt1: salt1,
+        walSalt2: salt2,
+        nodeID: 0n,
+      });
+
+      if (snapshotting) {
+        this.writePagesFromDB(enc, pageSize, finalCommit, lockPg, pageMap, walBuf, dbBuf);
       } else {
-        const pm = reader.pageMap();
-        pageMap = pm.pageIndex;
-        maxOffset = pm.maxOffset;
-        walCommit = pm.commit;
-        offset = prev.walOffset + prev.walSize;
-        salt1 = prev.salt1;
-        salt2 = prev.salt2;
-        prevCommit = prev.commit;
+        this.writePagesFromWAL(enc, pageSize, finalCommit, prevCommit, lockPg, pageMap, walBuf, dbBuf);
       }
+      enc.close();
+
+      const buf = sink.toBuffer();
+      const dir = this.ltxLevelDir(0);
+      await mkdirAll(dir);
+      const filename = this.ltxPath(0, txID, txID);
+      const tmp = `${filename}.tmp`;
+      await writeFile(tmp, buf);
+      await rename(tmp, filename);
+
+      return { level: 0, minTXID: txID, maxTXID: txID, size: buf.length, createdAt: Date.now() };
+    } finally {
+      this.commitRead();
     }
-
-    const walSize = snapshotting ? 0 : maxOffset > 0 ? maxOffset - offset : 0;
-
-    if (!snapshotting && walSize === 0) {
-      return null; // no new WAL pages since the last sync
-    }
-
-    if (snapshotting) {
-      // Read the WAL from the start to build a full page map for the snapshot.
-      try {
-        const full = new WALReader(walBuf);
-        const pm = full.pageMap();
-        pageMap = pm.pageIndex;
-        walCommit = pm.commit;
-        salt1 = full.salt1();
-        salt2 = full.salt2();
-      } catch (err) {
-        if (!(err instanceof WALEOFError)) throw err;
-      }
-      if (walCommit > 0) {
-        offset = WALHeaderSize;
-      }
-    }
-
-    const finalCommit = Math.max(commit, walCommit);
-
-    // Encode the LTX file.
-    const sink = new BufferSink();
-    const enc = new Encoder(sink);
-    enc.encodeHeader({
-      version: 3,
-      flags: HeaderFlagNoChecksum,
-      pageSize,
-      commit: finalCommit,
-      minTXID: txID,
-      maxTXID: txID,
-      timestamp: BigInt(Date.now()),
-      preApplyChecksum: 0n,
-      walOffset: BigInt(offset),
-      walSize: BigInt(snapshotting ? Math.max(0, walBuf.length - WALHeaderSize) : walSize),
-      walSalt1: salt1,
-      walSalt2: salt2,
-      nodeID: 0n,
-    });
-
-    if (snapshotting) {
-      this.writePagesFromDB(enc, pageSize, finalCommit, lockPg, pageMap, walBuf, dbBuf);
-    } else {
-      this.writePagesFromWAL(enc, pageSize, finalCommit, prevCommit, lockPg, pageMap, walBuf, dbBuf);
-    }
-    enc.close();
-
-    const buf = sink.toBuffer();
-    const dir = this.ltxLevelDir(0);
-    await mkdirAll(dir);
-    const filename = this.ltxPath(0, txID, txID);
-    const tmp = `${filename}.tmp`;
-    await writeFile(tmp, buf);
-    await rename(tmp, filename);
-
-    return { level: 0, minTXID: txID, maxTXID: txID, size: buf.length, createdAt: Date.now() };
   }
 
   /** Writes a full snapshot: every committed page, preferring WAL pages. */
@@ -305,65 +338,72 @@ export class LocalDatabase {
   async snapshot(): Promise<FileInfo | null> {
     const pos = await this.pos();
     const maxTXID = pos === 0n ? 1n : pos;
-    const dbBuf = new Uint8Array(await readFile(this.path));
-    const headerCommit = headerPageCount(dbBuf, this.pageSize);
 
-    const pageSize = this.pageSize;
-    const lockPg = lockPgno(pageSize);
-    const walBuf = await this.readWalOrEmpty();
+    this.beginRead();
+    try {
+      const commit = this.pageCount();
+      if (commit === 0) return null;
 
-    // Build the committed WAL page map for the overlay (may be empty).
-    let pageMap = new Map<number, number>();
-    let walCommit = 0;
-    let salt1 = 0;
-    let salt2 = 0;
-    if (walBuf.length > 0) {
-      try {
-        const full = new WALReader(walBuf);
-        const pm = full.pageMap();
-        pageMap = pm.pageIndex;
-        walCommit = pm.commit;
-        salt1 = full.salt1();
-        salt2 = full.salt2();
-      } catch (err) {
-        if (!(err instanceof WALEOFError)) throw err;
+      const pageSize = this.pageSize;
+      const lockPg = lockPgno(pageSize);
+      const dbBuf = new Uint8Array(await readFile(this.path));
+      const walBuf = await this.readWalOrEmpty();
+
+      // Build the committed WAL page map for the overlay (may be empty).
+      let pageMap = new Map<number, number>();
+      let walCommit = 0;
+      let salt1 = 0;
+      let salt2 = 0;
+      if (walBuf.length > 0) {
+        try {
+          const full = new WALReader(walBuf);
+          const pm = full.pageMap();
+          pageMap = pm.pageIndex;
+          walCommit = pm.commit;
+          salt1 = full.salt1();
+          salt2 = full.salt2();
+        } catch (err) {
+          if (!(err instanceof WALEOFError)) throw err;
+        }
       }
+
+      // The commit may only be present in the WAL (not yet checkpointed into
+      // the main database header), so take the larger of the two.
+      const finalCommit = Math.max(commit, walCommit);
+      if (finalCommit === 0) return null;
+
+      const sink = new BufferSink();
+      const enc = new Encoder(sink);
+      enc.encodeHeader({
+        version: 3,
+        flags: HeaderFlagNoChecksum,
+        pageSize,
+        commit: finalCommit,
+        minTXID: 1n,
+        maxTXID,
+        timestamp: BigInt(Date.now()),
+        preApplyChecksum: 0n,
+        walOffset: BigInt(WALHeaderSize),
+        walSize: BigInt(Math.max(0, walBuf.length - WALHeaderSize)),
+        walSalt1: salt1,
+        walSalt2: salt2,
+        nodeID: 0n,
+      });
+      this.writePagesFromDB(enc, pageSize, finalCommit, lockPg, pageMap, walBuf, dbBuf);
+      enc.close();
+
+      const buf = sink.toBuffer();
+      const dir = this.ltxLevelDir(9);
+      await mkdirAll(dir);
+      const filename = this.ltxPath(9, 1n, maxTXID);
+      const tmp = `${filename}.tmp`;
+      await writeFile(tmp, buf);
+      await rename(tmp, filename);
+
+      return { level: 9, minTXID: 1n, maxTXID, size: buf.length, createdAt: Date.now() };
+    } finally {
+      this.commitRead();
     }
-
-    // The database commit may only be present in the WAL (not yet checkpointed
-    // into the main database header), so take the larger of the two.
-    const commit = Math.max(headerCommit, walCommit);
-    if (commit === 0) return null;
-
-    const sink = new BufferSink();
-    const enc = new Encoder(sink);
-    enc.encodeHeader({
-      version: 3,
-      flags: HeaderFlagNoChecksum,
-      pageSize,
-      commit,
-      minTXID: 1n,
-      maxTXID,
-      timestamp: BigInt(Date.now()),
-      preApplyChecksum: 0n,
-      walOffset: BigInt(WALHeaderSize),
-      walSize: BigInt(Math.max(0, walBuf.length - WALHeaderSize)),
-      walSalt1: salt1,
-      walSalt2: salt2,
-      nodeID: 0n,
-    });
-    this.writePagesFromDB(enc, pageSize, commit, lockPg, pageMap, walBuf, dbBuf);
-    enc.close();
-
-    const buf = sink.toBuffer();
-    const dir = this.ltxLevelDir(9);
-    await mkdirAll(dir);
-    const filename = this.ltxPath(9, 1n, maxTXID);
-    const tmp = `${filename}.tmp`;
-    await writeFile(tmp, buf);
-    await rename(tmp, filename);
-
-    return { level: 9, minTXID: 1n, maxTXID, size: buf.length, createdAt: Date.now() };
   }
 
   /** Reads a single page, preferring the WAL over the database file. */
@@ -418,6 +458,14 @@ export class LocalDatabase {
       };
     } catch {
       return null;
+    }
+  }
+
+  /** Close releases the internal read-only connection. */
+  close(): void {
+    if (this.conn !== null) {
+      this.conn.close();
+      this.conn = null;
     }
   }
 }

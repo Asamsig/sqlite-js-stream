@@ -184,6 +184,14 @@ export class Replica {
     await writeFile(tmp, dbBytes.toBuffer());
     await rename(tmp, opt.outputPath);
   }
+
+  /** Close releases any internal database connection. */
+  close(): void {
+    if (this.db !== null) {
+      this.db.close();
+      this.db = null;
+    }
+  }
 }
 
 /**

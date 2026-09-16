@@ -48,6 +48,7 @@ test('first sync is a base snapshot; later syncs are incremental', async () => {
     assert.ok(pages2 < pages1, `incremental (${pages2}) should have fewer pages than base (${pages1})`);
     assert.ok(info2!.size < info1!.size, 'incremental file should be smaller');
   } finally {
+    db.close();
     t.close();
   }
 });
@@ -66,6 +67,7 @@ test('txID files are contiguous (each min-1 equals previous max)', async () => {
     assert.deepEqual(files.map((f) => f.minTXID), [1n, 2n, 3n]);
     assert.deepEqual(files.map((f) => f.maxTXID), [1n, 2n, 3n]);
   } finally {
+    db.close();
     t.close();
   }
 });

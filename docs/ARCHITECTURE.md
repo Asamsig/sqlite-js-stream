@@ -34,7 +34,7 @@ prevents the WAL from being checkpointed past our position.
 |-----------|----------------|
 | **LTX module** (`src/ltx/`) | Encode/decode LTX files; CRC-64 ISO checksums; LZ4 *block* codec; page index; compactor. |
 | **WAL module** (`src/wal/`) | Parse SQLite WAL header/frames; verify salt + checksum; produce `pageMap()` (latest committed page offsets). |
-| **LocalDatabase** (`src/db.ts`, internal) | Reads a database + `-wal` directly from disk (no SQLite driver/connection), builds LTX files (base snapshot, incremental L0, level-9 snapshot), and tracks the local position. It is an internal implementation detail, not part of the public API. |
+| **LocalDatabase** (`src/db.ts`, internal) | Reads a database + `-wal` directly from disk, builds LTX files (base snapshot, incremental L0, level-9 snapshot), and tracks the local position. It holds a short-lived **read-only** `node:sqlite` read transaction to **pin the WAL snapshot** (SQLite won't checkpoint/truncate past an active reader), then reads the files via `fs`. It is an internal implementation detail, not part of the public API. |
 | **Replica** (`src/replica.ts`) | Upload level-0/level-9 LTX files to a client; track the replicated position; `restore()`, `ensureExists()`, `syncStatus()`. |
 | **ReplicaClient** (`src/replica-client.ts`) | An interface to a storage backend (`LTXFiles`, `OpenLTXFile`, `WriteLTXFile`, `DeleteLTXFiles`, `DeleteAll`). |
 | **File backend** (`src/backends/file/`) | The simplest backend: store LTX files in `<root>/ltx/<level>/<min>-<max>.ltx`, atomic writes. |
@@ -103,6 +103,9 @@ left off, even after a restart.
 
 ## Restrictions & simplifications
 
+- **Snapshot consistency.** `sync()`/`snapshot()` pin a read-only snapshot via a `node:sqlite` read
+  transaction so the WAL cannot be checkpointed/truncated while the DB + WAL files are read; the
+  pinned reader's `PRAGMA page_count` also reports the commit including uncheckpointed WAL pages.
 - Reads are done with the whole DB/WAL file for MVP tests; large databases should stream page-by-page
   from file handles.
 - LZ4 uses `lz4js` (pure JS **block** format), which is interoperable for **decompression** but not

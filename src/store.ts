@@ -40,8 +40,9 @@ export class Store {
     }
   }
 
-  /** Close stops tracking all replicas. */
+  /** Close releases all replicas' internal connections. */
   close(): void {
+    for (const replica of this.items) replica.close();
     this.items = [];
   }
 }

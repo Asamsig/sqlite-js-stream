@@ -53,6 +53,7 @@ test('end-to-end: replicate a WAL database to a file replica and restore', async
     assert.equal(count.n, 5);
     restored.close();
   } finally {
+    replica.close();
     t.close();
   }
 });
@@ -77,6 +78,7 @@ test('ensureExists restores a missing local database', async () => {
     assert.equal(count.n, 2);
     restored.close();
   } finally {
+    replica.close();
     t.close();
   }
 });
@@ -101,6 +103,6 @@ test('sync replicates a header-only (empty) database', async () => {
     for await (const _ of client.ltxFiles({ level: 0, seek: 0n, useMetadata: false })) n++;
     assert.equal(n, 1);
   } finally {
-    // no resources held by the replica
+    replica.close();
   }
 });
