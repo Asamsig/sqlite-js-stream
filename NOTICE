@@ -1,0 +1,22 @@
+sqlite-js-stream
+Copyright 2024-2025 The sqlite-js-stream authors
+
+This product is a port of Litestream:
+
+  Litestream
+  https://github.com/benbjohnson/litestream
+  Copyright 2018-2025 Ben Johnson
+  Licensed under the Apache License, Version 2.0.
+
+The LTX file format and related design are derived from:
+
+  ltx (superfly) — https://github.com/superfly/ltx
+  Copyright the ltx authors
+  Licensed under the Apache License, Version 2.0.
+
+This product includes adaptations of documentation from the litestream repository
+(docs/ARCHITECTURE.md, docs/SQLITE_INTERNALS.md, docs/LTX_FORMAT.md, docs/PATTERNS.md),
+used under the Apache License, Version 2.0, with attribution.
+
+Portions of the WAL / LTX format descriptions are based on the SQLite documentation
+(https://www.sqlite.org/wal.html), which is in the public domain.
