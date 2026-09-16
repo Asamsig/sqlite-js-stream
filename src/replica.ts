@@ -6,7 +6,14 @@
  * files into a local cache, uploads them to the client, tracks the replicated
  * position, and can restore a database by merging LTX files. Mirrors
  * litestream's `replica.go`, but is agnostic to the SQLite driver the
- * application uses (it never touches a connection).
+ * application uses.
+ *
+ * For snapshot consistency it opens its own **independent read-only** SQLite
+ * connection (never the application's writable one) to pin the WAL while it
+ * reads. A single SQLite connection holds one transaction at a time, so
+ * reusing an application `DatabaseSync` handle would merge the read snapshot
+ * with the app's writes (and could read uncommitted rows). Keep the app's
+ * writer and the library's reader on separate connections to the same file.
  */
 
 import { access, mkdir, rename, writeFile } from 'node:fs/promises';

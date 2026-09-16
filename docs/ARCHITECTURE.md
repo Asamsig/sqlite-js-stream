@@ -104,8 +104,16 @@ left off, even after a restart.
 ## Restrictions & simplifications
 
 - **Snapshot consistency.** `sync()`/`snapshot()` pin a read-only snapshot via a `node:sqlite` read
-  transaction so the WAL cannot be checkpointed/truncated while the DB + WAL files are read; the
-  pinned reader's `PRAGMA page_count` also reports the commit including uncheckpointed WAL pages.
+  transaction on an independent read-only connection so the WAL cannot be checkpointed/truncated
+  while the DB + WAL files are read; the pinned reader's `PRAGMA page_count` also reports the commit
+  including uncheckpointed WAL pages.
+- **Connection sharing constraint.** The library uses a separate read-only connection for pinned
+  snapshots and never consumes the application's writable connection. A single SQLite connection
+  holds one transaction at a time: reusing the application's `DatabaseSync` handle would merge the
+  library's read snapshot with the app's writes (breaking snapshot isolation and letting the library
+  read uncommitted rows) and would prevent it from `BEGIN`-ing its pin if the app already had a
+  transaction open. The app's writer and the library's reader must be separate connections to the
+  same database file.
 - Reads are done with the whole DB/WAL file for MVP tests; large databases should stream page-by-page
   from file handles.
 - LZ4 uses `lz4js` (pure JS **block** format), which is interoperable for **decompression** but not

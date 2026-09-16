@@ -135,6 +135,28 @@ replication. Instead it:
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, and
 [`PLAN.md`](PLAN.md) for the milestone plan and format details.
 
+### Concurrency & snapshot consistency
+
+To keep snapshots consistent, `sync()`/`snapshot()` open a **separate, read-only** SQLite
+connection to the same database and hold a short-lived read transaction while they read the
+`-wal` + database files. SQLite will not checkpoint/truncate the WAL past an active reader, and the
+pinned reader's `PRAGMA page_count` reports the commit including uncheckpointed WAL pages.
+
+Your application is free to use its own SQLite driver and connections (`node:sqlite`,
+`better-sqlite3`, …) independently — the library reads only the files and never touches them.
+
+> **Do not point the library at your application's writable connection.**
+>
+> A single SQLite connection holds **one transaction at a time**. If the library were to use the
+> same `DatabaseSync` handle as your writer:
+> - its read snapshot would **not be isolated** from concurrent app writes (they'd merge into one
+>   transaction, and the library could read *uncommitted* rows or commit the app's writes), and
+> - if your app had a transaction open, the library could not `BEGIN` its snapshot pin at all.
+>
+> The library has no API to accept an app-owned writable connection, and it deliberately opens its
+> own read-only reader instead. Keep the library's reader and your app's writer on separate
+> connections to the same database file.
+
 ---
 
 ## Documentation
