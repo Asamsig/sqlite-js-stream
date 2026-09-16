@@ -16,3 +16,4 @@ export * from './replica-url.ts';
 export * from './backends/file/index.ts';
 export * from './db.ts';
 export * from './replica.ts';
+export * from './store.ts';

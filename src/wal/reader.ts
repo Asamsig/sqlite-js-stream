@@ -45,8 +45,8 @@ export class WALReader {
   private bo!: ByteOrder;
   private pageSizeVal = 0;
   private seqVal = 0;
-  private salt1 = 0;
-  private salt2 = 0;
+  private salt1Value = 0;
+  private salt2Value = 0;
   private chksum1 = 0;
   private chksum2 = 0;
   private frameN = 0;
@@ -66,8 +66,8 @@ export class WALReader {
     const r = new WALReader(data);
 
     // Load the salt from the caller; the beginning of the file may be gone.
-    r.salt1 = salt1;
-    r.salt2 = salt2;
+    r.salt1Value = salt1;
+    r.salt2Value = salt2;
 
     // Ensure the offset is positioned on a frame start.
     const frameSize = r.pageSizeVal + WALFrameHeaderSize;
@@ -98,6 +98,16 @@ export class WALReader {
   /** Seq returns the checkpoint sequence from the header. */
   seq(): number {
     return this.seqVal;
+  }
+
+  /** Salt1 returns the header salt-1 value. */
+  salt1(): number {
+    return this.salt1Value;
+  }
+
+  /** Salt2 returns the header salt-2 value. */
+  salt2(): number {
+    return this.salt2Value;
   }
 
   /** Offset returns the file offset of the last read frame (0 if none). */
@@ -191,8 +201,8 @@ export class WALReader {
 
     this.pageSizeVal = readU32BE(hdr, 8);
     this.seqVal = readU32BE(hdr, 12);
-    this.salt1 = readU32BE(hdr, 16);
-    this.salt2 = readU32BE(hdr, 20);
+    this.salt1Value = readU32BE(hdr, 16);
+    this.salt2Value = readU32BE(hdr, 20);
     this.chksum1 = chksum1;
     this.chksum2 = chksum2;
   }
@@ -216,7 +226,7 @@ export class WALReader {
     // Verify the frame salt matches the header salt.
     const salt1 = readU32BE(hdr, 8);
     const salt2 = readU32BE(hdr, 12);
-    if (this.salt1 !== salt1 || this.salt2 !== salt2) {
+    if (this.salt1Value !== salt1 || this.salt2Value !== salt2) {
       throw new WALEOFError();
     }
 

@@ -31,12 +31,16 @@ Verified on Node `v24.21.0`.
       **full-snapshot L0 file** from DB+WAL page map, local position from L0 files) and `Replica`
       (upload L0 to client, position tracking, `CalcRestorePlan`, page-merge `restore()`,
       `ensureExists`, `syncStatus`).
+- [x] **Milestone 5 — Incremental + snapshots + compactor + Store (core)**: `Compactor`, level-9
+      `DB.snapshot()`, incremental L0 sync (resume from WAL offset, snapshot fallback),
+      compactor-based `Restore`, and `Store` (multi-DB open/sync/close).
 
-> **MVP simplification (Milestone 4):** `DB.sync()` writes a **full database snapshot** per sync at
-> level 0 (`<meta>/ltx/0/<txID>-<txID>.ltx`) rather than incremental level-0 + level-9 snapshots.
-> This is valid, contiguous, and restorable; it is space-inefficient vs litestream's incremental L0.
-> True incremental L0 (reading only changed WAL pages via `WALReader.pageMap` from the last synced
-> offset) and level-9 snapshots + compaction are the next milestone.
+> **Milestone 5 completed (incremental + snapshots + compactor):** `DB.sync()` now writes a
+> **level-0 base snapshot** on the first sync and then **incremental level-0 files** (only the pages
+> whose latest committed version is in the WAL since the last synced offset, resuming via
+> `WALReader.withOffset`; falls back to a new base snapshot if the WAL was reset). `DB.snapshot()`
+> writes **level-9 full snapshots** (`min=1`). `Restore` and `Store` use the `Compactor` to merge a
+> level-9 snapshot with subsequent level-0 files. See `test/integration/snapshot-store.test.ts`.
 
 > **Interop note (Milestone 1):** Go's `superfly/ltx` golden file-checksum vectors
 > (`0xe27f4c18f0da2c10`, `0xd926967672f7ca53`) are pinned in `test/ltx/golden.test.ts`. Our `lz4js`
@@ -459,7 +463,7 @@ This is the core. Implement:
 - `db.ensureExists()` restores when local file is absent, no-ops when present.
 - Salt reset forces a snapshot (full DB → LTX) and resume.
 
-### Milestone 5 — Store + config + monitoring + compaction (post-MVP, still core)
+### Milestone 5 — Store + config + monitoring + compaction (post-MVP, still core) ✅ DONE (core)
 
 - **`src/store.ts`** — open many DBs concurrently (bounded, e.g. 50), start per-DB monitor loops,
   schedule snapshot interval, run retention.

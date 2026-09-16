@@ -10,10 +10,11 @@ import { access, mkdir, rename, writeFile } from 'node:fs/promises';
 import nodePath from 'node:path';
 
 import {
+  BufferSink,
+  Compactor,
   Decoder,
-  lockPgno,
+  HeaderFlagNoChecksum,
   type FileInfo,
-  type Header,
 } from './ltx/index.ts';
 import type { DB } from './db.ts';
 import type { ReplicaClient } from './replica-client.ts';
@@ -88,6 +89,14 @@ export class Replica {
     await this.sync();
   }
 
+  /** Snapshot writes and uploads a level-9 full-database LTX file. */
+  async snapshot(): Promise<void> {
+    const info = await this.db.snapshot();
+    if (info) {
+      await this.uploadLtxFile(9, info.minTXID, info.maxTXID);
+    }
+  }
+
   /** SyncStatus reports the local and remote positions. */
   async syncStatus(): Promise<SyncStatus> {
     const localTXID = await this.db.pos();
@@ -122,75 +131,82 @@ export class Replica {
     const plan = await calcRestorePlan(this.client, opt.txID ?? 0n);
     if (plan.length === 0) throw new Error('no matching backup files available');
 
-    // Merge pages across the plan (later files override earlier ones).
-    const pages = new Map<number, Uint8Array>();
-    let commit = 0;
-    let pageSize = 0;
+    // Read each LTX file into memory (MVP; streaming readers come later).
+    const readers: Uint8Array[] = [];
     for (const info of plan) {
-      const { header, pageData } = await this.decodeFile(info);
-      commit = Math.max(commit, header.commit);
-      pageSize = header.pageSize;
-      for (const [pgno, data] of pageData) pages.set(pgno, data);
+      const rc = await this.client.openLtxFile({
+        level: info.level,
+        minTXID: info.minTXID,
+        maxTXID: info.maxTXID,
+        offset: 0,
+        size: 0,
+      });
+      readers.push(await readAll(rc));
     }
 
-    const lockPg = lockPgno(pageSize);
-    const out = new Uint8Array(commit * pageSize);
-    for (let pgno = 1; pgno <= commit; pgno++) {
-      if (pgno === lockPg) continue; // leave as zeros
-      const data = pages.get(pgno);
-      if (data) out.set(data, (pgno - 1) * pageSize);
-    }
+    // Compact all files into one LTX snapshot stream, then decode to a DB.
+    const merged = new BufferSink();
+    const compactor = new Compactor(merged, readers);
+    compactor.headerFlags = HeaderFlagNoChecksum;
+    compactor.compact();
+
+    const dbBytes = new BufferSink();
+    const dec = new Decoder(merged.toBuffer());
+    dec.decodeDatabaseTo(dbBytes);
 
     // Atomically write the output database.
     await mkdir(nodePath.dirname(opt.outputPath), { recursive: true });
     const tmp = `${opt.outputPath}.tmp`;
-    await writeFile(tmp, out);
+    await writeFile(tmp, dbBytes.toBuffer());
     await rename(tmp, opt.outputPath);
   }
 
-  /** Decodes a single LTX file from the client into its pages. */
-  private async decodeFile(info: FileInfo): Promise<{ header: Header; pageData: Map<number, Uint8Array> }> {
-    const rc = await this.client.openLtxFile({
-      level: info.level,
-      minTXID: info.minTXID,
-      maxTXID: info.maxTXID,
-      offset: 0,
-      size: 0,
-    });
-    const buf = await readAll(rc);
-    const dec = new Decoder(buf);
-    dec.decodeHeader();
-    const header = dec.Header();
-    const pageData = new Map<number, Uint8Array>();
-    const data = new Uint8Array(header.pageSize);
-    for (;;) {
-      const ph = dec.decodePage(data);
-      if (ph === null) break;
-      pageData.set(ph.pgno, new Uint8Array(data));
-    }
-    dec.close();
-    return { header, pageData };
-  }
+
 }
 
 /**
- * CalcRestorePlan returns LTX files (level 0) to apply, in order, to
- * reconstruct a database up to `txID`. For the MVP each level-0 file is a full
- * snapshot so the latest eligible file supersedes the rest; merging remains
- * correct if incremental files are later introduced.
+ * CalcRestorePlan returns LTX files to apply, in order, to reconstruct a
+ * database up to `txID` (0 = latest). It prefers the latest level-9 snapshot
+ * before the target as the base, then appends contiguous level-0 files.
  */
 export async function calcRestorePlan(
   client: ReplicaClient,
   txID: bigint,
 ): Promise<FileInfo[]> {
-  const files: FileInfo[] = [];
+  const plan: FileInfo[] = [];
+  let currentMax = 0n;
+
+  // Pick the latest level-9 snapshot at or before the target as the base.
+  let base: FileInfo | null = null;
+  for await (const info of client.ltxFiles({ level: 9, seek: 0n, useMetadata: false })) {
+    if (txID !== 0n && info.maxTXID > txID) continue;
+    if (!base || info.maxTXID > base.maxTXID) base = info;
+  }
+  if (base) {
+    plan.push(base);
+    currentMax = base.maxTXID;
+  }
+
+  // Gather level-0 files and extend the contiguous range from currentMax.
+  const l0: FileInfo[] = [];
   for await (const info of client.ltxFiles({ level: 0, seek: 0n, useMetadata: false })) {
     if (txID !== 0n && info.maxTXID > txID) continue;
-    files.push(info);
+    l0.push(info);
   }
-  files.sort((a, b) => (a.minTXID < b.minTXID ? -1 : a.minTXID > b.minTXID ? 1 : 0));
-  if (files.length === 0) {
+  l0.sort((a, b) => (a.minTXID < b.minTXID ? -1 : a.minTXID > b.minTXID ? 1 : 0));
+
+  for (const info of l0) {
+    if (info.maxTXID <= currentMax) continue; // already covered by the base
+    if (info.minTXID > currentMax + 1n) break; // non-contiguous
+    plan.push(info);
+    currentMax = info.maxTXID;
+  }
+
+  if (plan.length === 0) {
     throw new Error('no matching backup files available');
   }
-  return files;
+  if (txID !== 0n && currentMax < txID) {
+    throw new Error('no matching backup files available');
+  }
+  return plan;
 }
