@@ -13,6 +13,26 @@ Verified on Node `v24.21.0`.
 
 ---
 
+## 0. Status
+
+- [x] **Milestone 0 — scaffolding**: `package.json`, `tsconfig.json` (type-stripping friendly, `noEmit`),
+      `node:test` running `.test.ts` directly, `tsc --noEmit` clean. `node:sqlite` + `lz4js` installed.
+- [x] **Milestone 1 — LTX format core**: `Crc64` (ISO), `ChecksumPage`/`ChecksumReader`, header/page/
+      trailer/page-index/filename codecs, LZ4 block adapter, `Encoder`/`Decoder`, `BufferSink`,
+      `FileInfoSliceIterator`. Unit + round-trip + golden tests green (48 tests).
+- [ ] **Milestone 2 — WAL reader**
+- [ ] **Milestone 3 — ReplicaClient + file backend**
+- [ ] **Milestone 4 — DB + Replica end-to-end**
+
+> **Interop note (Milestone 1):** Go's `superfly/ltx` golden file-checksum vectors
+> (`0xe27f4c18f0da2c10`, `0xd926967672f7ca53`) are pinned in `test/ltx/golden.test.ts`. Our `lz4js`
+> produces *valid* but not *byte-identical* LZ4 block bytes to Go's `pierrec/lz4/v4`, so our file
+> checksums differ. LZ4 block **decompression is fully interoperable** (files we write are readable by
+> Go and vice-versa); only byte-identical encoding requires a liblz4-compatible codec. Validate Go
+> byte-parity in CI with Go goldens if we later switch to `lz4-napi`/WASM liblz4.
+
+---
+
 ## 1. What Litestream Is (and what we port)
 
 Litestream runs as a background process that watches a SQLite database's **WAL file**, converts the
@@ -337,13 +357,13 @@ interface ReplicaClient {
 
 ## 7. Milestones (minimum functionality first)
 
-### Milestone 0 — Project scaffolding (TDD infra) ✅ trivial
+### Milestone 0 — Project scaffolding (TDD infra) ✅ DONE
 
 - `git init`, `package.json`, `tsconfig.json`, `.gitignore`.
 - Verify: `node --test` runs a `.test.ts`; `tsc --noEmit` passes; `.ts` runs directly.
 - Add a trivial passing test + `npm test` / `npm run typecheck` scripts.
 
-### Milestone 1 — LTX format core (pure, no DB) — **foundation**
+### Milestone 1 — LTX format core (pure, no DB) — **foundation** ✅ DONE
 
 Implement and unit-test, in order:
 
