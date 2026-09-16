@@ -66,11 +66,13 @@ prevents the WAL from being checkpointed past our position.
 Writes a **level-9** full snapshot LTX file (`MinTXID = 1`, `MaxTXID = current position`) containing
 every committed page. Combined with incremental level-0 files this gives point-in-time restore.
 
-### Replica.sync()
+### Replica.run()
 
-Uploads every local level-0 LTX file from `replicaPos + 1` to `dbPos` to the client, advancing the
-replicated position as it goes. The replica position is the max `MaxTXID` among level-0 files on the
-client.
+`Replica.sync()` writes a local level-0 LTX file and then uploads every pending L0 file from
+`replicaPos + 1` to `dbPos`, advancing the replicated position (which is the max `MaxTXID` among
+level-0 files on the client). `Replica.run({ intervalMs, signal })` loops this continuously until
+the `AbortSignal` is aborted: it syncs immediately, waits `intervalMs`, then repeats. A transient
+sync error is logged and the loop keeps going.
 
 ### Replica.restore()
 

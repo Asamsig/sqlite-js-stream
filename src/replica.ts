@@ -18,6 +18,7 @@
 
 import { access, mkdir, rename, writeFile } from 'node:fs/promises';
 import nodePath from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import {
   BufferSink,
@@ -42,6 +43,13 @@ export interface SyncStatus {
   localTXID: bigint;
   remoteTXID: bigint;
   inSync: boolean;
+}
+
+export interface ReplicaRunOptions {
+  /** Milliseconds between syncs. Defaults to 1000. */
+  intervalMs?: number;
+  /** Abort to stop continuous syncing. */
+  signal?: AbortSignal;
 }
 
 function chunks(data: Uint8Array, size = 256 * 1024): AsyncIterable<Uint8Array> {
@@ -118,6 +126,29 @@ export class Replica {
   /** SyncAndWait uploads all pending LTX files; harmless if already synced. */
   async syncAndWait(): Promise<void> {
     await this.sync();
+  }
+
+  /**
+   * Run continuously syncs the replica until `signal` is aborted. It syncs
+   * immediately, then waits `intervalMs` and repeats. Errors during a sync are
+   * logged and the loop keeps going, so a transient failure does not stop
+   * replication. Resolves once the signal is aborted.
+   */
+  async run(opt: ReplicaRunOptions = {}): Promise<void> {
+    const { intervalMs = 1000, signal } = opt;
+    while (!signal?.aborted) {
+      try {
+        await this.sync();
+      } catch (err) {
+        this.logger.error('replica sync error', err);
+      }
+      if (signal?.aborted) break;
+      try {
+        await sleep(intervalMs, undefined, { signal });
+      } catch {
+        break; // aborted during the sleep
+      }
+    }
   }
 
   /** Snapshot writes and uploads a level-9 full-database LTX file. */

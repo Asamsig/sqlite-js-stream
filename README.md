@@ -117,6 +117,38 @@ const client = newReplicaClientFromURL('file:///data/replica');
 const replica = new Replica('/data/app.db', client);
 ```
 
+### Continuous sync
+
+For ongoing replication, `replica.run()` syncs immediately and then repeats on an
+interval until the supplied `AbortSignal` is aborted. Sync errors are logged and the
+loop keeps going, so a transient failure doesn't stop replication:
+
+```ts
+import { Replica, FileReplicaClient } from 'sqlite-js-stream';
+
+const replica = new Replica('/data/app.db', new FileReplicaClient('/data/replica'));
+const ac = new AbortController();
+
+// Run continuously (sync now, then every 1s); resolves when aborted.
+const runP = replica.run({ intervalMs: 1000, signal: ac.signal });
+
+// ... later, to stop:
+ac.abort();
+await runP;
+```
+
+If you want to keep replicating in the background without awaiting, call `run()` and
+`catch` its promise (it resolves on abort):
+
+```ts
+replica.run({ intervalMs: 1000, signal: ac.signal }).catch((err) => {
+  console.error('continuous sync stopped', err);
+});
+```
+
+`Store` also exposes `syncAll()`/`snapshotAll()` for one-shot operations; a continuous
+loop can be driven by calling `replica.run()` per database, or via your own scheduler.
+
 ---
 
 ## How it works
