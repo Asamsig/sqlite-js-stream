@@ -34,7 +34,7 @@ prevents the WAL from being checkpointed past our position.
 |-----------|----------------|
 | **LTX module** (`src/ltx/`) | Encode/decode LTX files; CRC-64 ISO checksums; LZ4 *block* codec; page index; compactor. |
 | **WAL module** (`src/wal/`) | Parse SQLite WAL header/frames; verify salt + checksum; produce `pageMap()` (latest committed page offsets). |
-| **DB** (`src/db.ts`) | Open a SQLite DB in WAL mode; read pages from the DB file + WAL; build LTX files (base snapshot, incremental L0, level-9 snapshot); track local position. |
+| **Database** (`src/db.ts`) | The driver-agnostic interface the replication layer depends on (`pos`, `sync`, `snapshot`, `ltxPath`, `l0Files`). The bundled default, obtained via `openDatabase`, opens SQLite in WAL mode, reads pages from the DB file + WAL, builds LTX files (base snapshot, incremental L0, level-9 snapshot), and tracks the local position. Applications may supply their own implementation. |
 | **Replica** (`src/replica.ts`) | Upload level-0/level-9 LTX files to a client; track the replicated position; `restore()`, `ensureExists()`, `syncStatus()`. |
 | **ReplicaClient** (`src/replica-client.ts`) | An interface to a storage backend (`LTXFiles`, `OpenLTXFile`, `WriteLTXFile`, `DeleteLTXFiles`, `DeleteAll`). |
 | **File backend** (`src/backends/file/`) | The simplest backend: store LTX files in `<root>/ltx/<level>/<min>-<max>.ltx`, atomic writes. |

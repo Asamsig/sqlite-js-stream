@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 
 import {
-  DB,
+  openDatabase,
   FileReplicaClient,
   Replica,
   Store,
@@ -14,7 +14,7 @@ import { createWALDB, makeTempDir } from '../helpers/make-db.ts';
 
 test('level-9 snapshot becomes the restore base', async () => {
   const t = createWALDB(['a', 'b', 'c']);
-  const db = await DB.open(t.path);
+  const db = await openDatabase(t.path);
   const client = new FileReplicaClient(makeTempDir('repl-'));
   const replica = new Replica(db, client);
   try {

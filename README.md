@@ -38,10 +38,10 @@ npm install sqlite-js-stream
 ## Quick start
 
 ```ts
-import { DB, Replica, FileReplicaClient } from 'sqlite-js-stream';
+import { openDatabase, Replica, FileReplicaClient } from 'sqlite-js-stream';
 
-// 1. Open a SQLite database (WAL mode, pins a read snapshot).
-const db = await DB.open('/data/app.db');
+// 1. Open a database handle (driver-agnostic, returns a `Database`).
+const db = await openDatabase('/data/app.db');
 
 // 2. Choose a replica destination. A local directory is simplest.
 const client = new FileReplicaClient('/data/replica');
@@ -114,10 +114,10 @@ store.close();
 Replica clients are created from URLs via the factory registry:
 
 ```ts
-import { newReplicaClientFromURL, DB, Replica } from 'sqlite-js-stream';
+import { newReplicaClientFromURL, openDatabase, Replica } from 'sqlite-js-stream';
 
 const client = newReplicaClientFromURL('file:///data/replica');
-const replica = new Replica(await DB.open('/data/app.db'), client);
+const replica = new Replica(await openDatabase('/data/app.db'), client);
 ```
 
 ---

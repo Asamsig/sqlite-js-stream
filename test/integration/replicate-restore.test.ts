@@ -4,12 +4,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { DB, FileReplicaClient, Replica } from '../../src/index.ts';
+import { openDatabase, type Database, FileReplicaClient, Replica } from '../../src/index.ts';
 import { createWALDB, makeTempDir } from '../helpers/make-db.ts';
 
 test('end-to-end: replicate a WAL database to a file replica and restore', async () => {
   const t = createWALDB(['a', 'b', 'c']); // connection stays open (WAL retained)
-  const db = await DB.open(t.path);
+  const db = await openDatabase(t.path);
   const client = new FileReplicaClient(makeTempDir('repl-'));
   const replica = new Replica(db, client);
 
@@ -64,7 +64,7 @@ test('end-to-end: replicate a WAL database to a file replica and restore', async
 test('ensureExists restores a missing local database', async () => {
   const t = createWALDB(['x', 'y']);
   const client = new FileReplicaClient(makeTempDir('repl-'));
-  let db: DB | null = await DB.open(t.path);
+  let db: Database | null = await openDatabase(t.path);
   const replica = new Replica(db, client);
 
   try {
@@ -93,7 +93,7 @@ test('ensureExists restores a missing local database', async () => {
 test('sync replicates a header-only (empty) database', async () => {
   const dir = makeTempDir('empty-');
   const path = join(dir, 'empty.db');
-  const db = await DB.open(path);
+  const db = await openDatabase(path);
   const client = new FileReplicaClient(join(dir, 'repl'));
   const replica = new Replica(db, client);
   try {

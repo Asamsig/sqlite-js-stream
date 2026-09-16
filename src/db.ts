@@ -37,8 +37,37 @@ import {
 } from './wal/index.ts';
 import { mkdirAll } from './util/fs.ts';
 
-/** DB wraps a SQLite database and its LTX replication state. */
-export class DB {
+/**
+ * Database is the interface the replication layer depends on.
+ *
+ * It is agnostic to any particular SQLite driver: `pos`, `sync`, `snapshot` and
+ * `ltxPath` are all that `Replica`/`Store` need. The bundled, `node:sqlite`-backed
+ * default implementation is obtained via `openDatabase`; applications may provide
+ * their own `Database` (e.g. backed by another driver) instead.
+ */
+export interface Database {
+  readonly path: string;
+  readonly pageSize: number;
+  /** Position returns the max TXID in the local level-0 cache (0 if none). */
+  pos(): Promise<bigint>;
+  /** Sync builds a level-0 LTX file and writes it to the local cache. */
+  sync(): Promise<FileInfo | null>;
+  /** Snapshot writes a level-9 full-database LTX file. */
+  snapshot(): Promise<FileInfo | null>;
+  /** LTXPath returns the local path of a single LTX file. */
+  ltxPath(level: number, minTXID: bigint, maxTXID: bigint): string;
+  /** L0Files lists local level-0 LTX files, sorted by TXID. */
+  l0Files(): Promise<FileInfo[]>;
+  /** Close releases any underlying resources. */
+  close(): void;
+}
+
+/**
+ * SQLiteDatabase is the default `Database` implementation, backed by
+ * `node:sqlite` (a `DatabaseSync` connection used for page_size/page_count and
+ * to pin a read snapshot) plus direct reads of the database and `-wal` files.
+ */
+class SQLiteDatabase implements Database {
   readonly path: string;
   readonly metaPath: string;
   readonly pageSize: number;
@@ -52,7 +81,7 @@ export class DB {
   }
 
   /** Opens (and creates, if needed) a SQLite database in WAL mode. */
-  static async open(path: string): Promise<DB> {
+  static async open(path: string): Promise<SQLiteDatabase> {
     const conn = new DatabaseSync(path);
     conn.exec('PRAGMA journal_mode=WAL');
     conn.exec('PRAGMA wal_autocheckpoint=0');
@@ -64,7 +93,7 @@ export class DB {
     const metaPath = `${path}-litestream`;
     await mkdirAll(nodePath.join(metaPath, 'ltx', '0'));
 
-    return new DB(path, metaPath, pageSize, conn);
+    return new SQLiteDatabase(path, metaPath, pageSize, conn);
   }
 
   /** WALPath returns the path to the database's WAL file. */
@@ -411,6 +440,15 @@ export class DB {
   close(): void {
     this.conn.close();
   }
+}
+
+/**
+ * OpenDatabase opens the default (node:sqlite-backed) database handle as a
+ * driver-agnostic `Database`. Applications may instead supply their own
+ * implementation.
+ */
+export function openDatabase(path: string): Promise<Database> {
+  return SQLiteDatabase.open(path);
 }
 
 /** Creates a WALReader positioned at `offset`, or null if it cannot resume. */

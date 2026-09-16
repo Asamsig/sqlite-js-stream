@@ -16,7 +16,7 @@ import {
   HeaderFlagNoChecksum,
   type FileInfo,
 } from './ltx/index.ts';
-import type { DB } from './db.ts';
+import type { Database } from './db.ts';
 import type { ReplicaClient } from './replica-client.ts';
 import { readAll } from './util/stream.ts';
 import type { Logger } from './util/logger.ts';
@@ -44,12 +44,12 @@ function chunks(data: Uint8Array, size = 256 * 1024): AsyncIterable<Uint8Array> 
 
 /** Replica replicates a single database to a ReplicaClient. */
 export class Replica {
-  readonly db: DB;
+  readonly db: Database;
   readonly client: ReplicaClient;
   private logger: Logger;
   private posValue: bigint | null = null;
 
-  constructor(db: DB, client: ReplicaClient, logger: Logger = noopLogger) {
+  constructor(db: Database, client: ReplicaClient, logger: Logger = noopLogger) {
     this.db = db;
     this.client = client;
     this.logger = logger;

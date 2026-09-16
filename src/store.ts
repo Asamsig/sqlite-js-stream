@@ -6,14 +6,14 @@
  * retention are future work.
  */
 
-import type { DB } from './db.ts';
+import { openDatabase } from './db.ts';
+import type { Database } from './db.ts';
 import type { Replica } from './replica.ts';
-import { DB as DBClass } from './db.ts';
 import { Replica as ReplicaClass } from './replica.ts';
 import type { ReplicaClient } from './replica-client.ts';
 
 export interface StoreReplica {
-  db: DB;
+  db: Database;
   replica: Replica;
 }
 
@@ -21,9 +21,9 @@ export interface StoreReplica {
 export class Store {
   private items: StoreReplica[] = [];
 
-  /** OpenDB opens a database and wires it to a replica client. */
+  /** OpenDB opens a database (via `openDatabase`) and wires it to a replica client. */
   async openDB(path: string, client: ReplicaClient): Promise<Replica> {
-    const db = await DBClass.open(path);
+    const db = await openDatabase(path);
     const replica = new ReplicaClass(db, client);
     this.items.push({ db, replica });
     return replica;
