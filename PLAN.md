@@ -20,7 +20,9 @@ Verified on Node `v24.21.0`.
 - [x] **Milestone 1 — LTX format core**: `Crc64` (ISO), `ChecksumPage`/`ChecksumReader`, header/page/
       trailer/page-index/filename codecs, LZ4 block adapter, `Encoder`/`Decoder`, `BufferSink`,
       `FileInfoSliceIterator`. Unit + round-trip + golden tests green (48 tests).
-- [ ] **Milestone 2 — WAL reader**
+- [x] **Milestone 2 — WAL reader**: `src/wal/` — `WALReader` (header/frame parse, salt + checksum
+      validation, `pageMap` with committed-page-tracking + shrunk-DB page drop), `WALChecksum`,
+      `withOffset` resume, `PrevFrameMismatchError`. Verified against real `node:sqlite` WAL files.
 - [ ] **Milestone 3 — ReplicaClient + file backend**
 - [ ] **Milestone 4 — DB + Replica end-to-end**
 
@@ -389,7 +391,7 @@ Implement and unit-test, in order:
 - Lock page (`pgno == LockPgno(pageSize)`) is skipped on encode and `ChecksumReader`.
 - Golden byte-layout tests for a minimal file.
 
-### Milestone 2 — WAL reader (pure, SQLite-driven fixtures)
+### Milestone 2 — WAL reader (pure, SQLite-driven fixtures) ✅ DONE
 
 - **`wal/checksum.ts`** — `walChecksum(byteOrder, s0, s1, bytes)`.
 - **`wal/reader.ts`** — `WALReader`: header parse + validation, frame read + salt + checksum

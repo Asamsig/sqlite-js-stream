@@ -39,6 +39,15 @@ export function readU32BE(buf: Uint8Array, off: number): number {
   ) >>> 0;
 }
 
+export function readU32LE(buf: Uint8Array, off: number): number {
+  return (
+    buf[off] |
+    (buf[off + 1] << 8) |
+    (buf[off + 2] << 16) |
+    ((buf[off + 3] | 0) << 24)
+  ) >>> 0;
+}
+
 export function readU64BE(buf: Uint8Array, off: number): bigint {
   let n = 0n;
   for (let i = 0; i < 8; i++) {
