@@ -148,11 +148,14 @@ export class LocalDatabase {
     return this.conn;
   }
 
-  /** Pins a WAL snapshot by starting a read transaction and issuing a read. */
+  /**
+   * Pins a WAL snapshot by starting a read transaction and issuing a read that
+   * touches the database (a plain `SELECT 1` does not acquire the WAL read lock).
+   */
   private beginRead(): void {
     const conn = this.ensureConn();
     conn.exec('BEGIN');
-    conn.prepare('SELECT 1').get();
+    conn.prepare('SELECT count(*) FROM sqlite_master').get();
   }
 
   /** Releases the pinned read snapshot. */
