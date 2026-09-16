@@ -2,8 +2,9 @@
  * LTX page header marshalling.
  */
 
-import { PageHeaderSize, PageHeaderFlagSize } from './constants.ts';
+import { PageHeaderSize, PageHeaderFlagSize, MaxPageSize } from './constants.ts';
 import { assertFull, readU16BE, readU32BE, writeU16BE, writeU32BE } from './bytes.ts';
+import { decompressBlockInto } from './lz4.ts';
 import type { PageHeader } from './types.ts';
 
 /** MarshalBinary encodes a PageHeader to its 6-byte representation. */
@@ -31,4 +32,48 @@ export function validatePageHeader(h: PageHeader): void {
   if ((h.flags & ~PageHeaderFlagSize) !== 0) {
     throw new Error(`invalid page header flags: 0x${h.flags.toString(16)}`);
   }
+}
+
+/** The decoded result of a single LTX page frame. */
+export interface DecodedPage {
+  header: PageHeader;
+  data: Uint8Array;
+}
+
+/**
+ * DecodePageData decodes a single page frame from `b` (which must start at a
+ * page header). Matches Go's `ltx.DecodePageData`. For an empty (zero) page
+ * header, `data` is an empty buffer.
+ *
+ * Note: the uncompressed byte length is unknown here; LTX pages are at most
+ * `MaxPageSize`, so we decompress into a 64KiB buffer and slice to the bytes
+ * written. Callers that know the page size should use `DecodePage` in the
+ * decoder for the size-accurate path.
+ */
+export function decodePageData(b: Uint8Array): DecodedPage {
+  const header = unmarshalPageHeader(b);
+  if (header.pgno === 0 && header.flags === 0) {
+    return { header, data: new Uint8Array(0) };
+  }
+  validatePageHeader(header);
+
+  if ((header.flags & PageHeaderFlagSize) !== 0) {
+    if (b.length < PageHeaderSize + 4) {
+      throw new Error('buffer too small for size prefix');
+    }
+    const dataSize = readU32BE(b, PageHeaderSize);
+    const offset = PageHeaderSize + 4;
+    if (b.length < offset + dataSize) {
+      throw new Error(`buffer too small for data: need ${offset + dataSize}, have ${b.length}`);
+    }
+    const compressed = b.subarray(offset, offset + dataSize);
+    const buf = new Uint8Array(MaxPageSize);
+    const n = decompressBlockInto(compressed, buf);
+    if (n <= 0) {
+      throw new Error('decompress block failed');
+    }
+    return { header, data: buf.subarray(0, n) };
+  }
+
+  throw new Error('legacy LZ4 frame format not supported');
 }

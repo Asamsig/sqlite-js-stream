@@ -124,8 +124,8 @@ export interface FileInfo {
   level: number;
   minTXID: TXID;
   maxTXID: TXID;
-  preApplyChecksum: Checksum;
-  postApplyChecksum: Checksum;
+  preApplyChecksum?: Checksum;
+  postApplyChecksum?: Checksum;
   size: number;
   createdAt: number; // ms since Unix epoch
   checksum?: Checksum;
@@ -134,14 +134,14 @@ export interface FileInfo {
 export function preApplyPos(info: FileInfo): Pos {
   return {
     txID: info.minTXID - 1n,
-    postApplyChecksum: info.preApplyChecksum,
+    postApplyChecksum: info.preApplyChecksum ?? 0n,
   };
 }
 
 export function postApplyPos(info: FileInfo): Pos {
   return {
     txID: info.maxTXID,
-    postApplyChecksum: info.postApplyChecksum,
+    postApplyChecksum: info.postApplyChecksum ?? 0n,
   };
 }
 

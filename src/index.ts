@@ -11,3 +11,6 @@ export type TXID = bigint;
 
 export * from './ltx/index.ts';
 export * from './wal/index.ts';
+export * from './replica-client.ts';
+export * from './replica-url.ts';
+export * from './backends/file/index.ts';

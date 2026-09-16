@@ -23,7 +23,10 @@ Verified on Node `v24.21.0`.
 - [x] **Milestone 2 — WAL reader**: `src/wal/` — `WALReader` (header/frame parse, salt + checksum
       validation, `pageMap` with committed-page-tracking + shrunk-DB page drop), `WALChecksum`,
       `withOffset` resume, `PrevFrameMismatchError`. Verified against real `node:sqlite` WAL files.
-- [ ] **Milestone 3 — ReplicaClient + file backend**
+- [x] **Milestone 3 — ReplicaClient + file backend**: `ReplicaClient` interface + `findLtxFiles`/
+      `fetchLtxHeader`/`fetchPageIndex`/`fetchPage` helpers, `LTXError`, path helpers, replica URL
+      parsing + factory registration, and `FileReplicaClient` (atomic temp+rename+fsync writes,
+      mtime from LTX header, seek/range reads, delete).
 - [ ] **Milestone 4 — DB + Replica end-to-end**
 
 > **Interop note (Milestone 1):** Go's `superfly/ltx` golden file-checksum vectors
@@ -405,7 +408,7 @@ Implement and unit-test, in order:
 - Corrupt a salt / checksum ⇒ `EOF` (frame mismatch) as litestream does.
 - `withOffset` resumes correctly after a crafted multi-frame WAL.
 
-### Milestone 3 — ReplicaClient interface + File backend
+### Milestone 3 — ReplicaClient interface + File backend ✅ DONE
 
 - **`src/replica-client.ts`** — the interface + `FetchLTXHeader`, `FetchPageIndex`, `FetchPage`
   helpers (partial-read + trailer/varint logic).

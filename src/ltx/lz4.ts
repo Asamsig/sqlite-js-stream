@@ -38,7 +38,8 @@ export function compressBlock(data: Uint8Array): Uint8Array {
 
 /**
  * decompressBlock decompresses an LZ4 block into a buffer of exactly
- * `uncompressedSize` bytes. Throws if the block is invalid.
+ * `uncompressedSize` bytes. Throws if the block is invalid or produces a
+ * different size.
  */
 export function decompressBlock(data: Uint8Array, uncompressedSize: number): Uint8Array {
   const dst = new Uint8Array(uncompressedSize);
@@ -47,6 +48,15 @@ export function decompressBlock(data: Uint8Array, uncompressedSize: number): Uin
     throw new Error(`lz4 block decompressed to ${n} bytes, expected ${uncompressedSize}`);
   }
   return dst;
+}
+
+/**
+ * decompressBlockInto decompresses an LZ4 block into `dst` and returns the
+ * number of bytes written. Does not require knowing the uncompressed size
+ * ahead of time.
+ */
+export function decompressBlockInto(data: Uint8Array, dst: Uint8Array): number {
+  return lz4.decompressBlock(data, dst, 0, data.length, 0);
 }
 
 /** Encodes a literal-only LZ4 block (no matches). Always valid. */
