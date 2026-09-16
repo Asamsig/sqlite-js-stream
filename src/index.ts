@@ -14,3 +14,5 @@ export * from './wal/index.ts';
 export * from './replica-client.ts';
 export * from './replica-url.ts';
 export * from './backends/file/index.ts';
+export * from './db.ts';
+export * from './replica.ts';

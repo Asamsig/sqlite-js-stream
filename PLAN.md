@@ -27,7 +27,16 @@ Verified on Node `v24.21.0`.
       `fetchLtxHeader`/`fetchPageIndex`/`fetchPage` helpers, `LTXError`, path helpers, replica URL
       parsing + factory registration, and `FileReplicaClient` (atomic temp+rename+fsync writes,
       mtime from LTX header, seek/range reads, delete).
-- [ ] **Milestone 4 — DB + Replica end-to-end**
+- [x] **Milestone 4 — DB + Replica end-to-end (MVP)**: `DB` (open WAL, `sync()` builds a
+      **full-snapshot L0 file** from DB+WAL page map, local position from L0 files) and `Replica`
+      (upload L0 to client, position tracking, `CalcRestorePlan`, page-merge `restore()`,
+      `ensureExists`, `syncStatus`).
+
+> **MVP simplification (Milestone 4):** `DB.sync()` writes a **full database snapshot** per sync at
+> level 0 (`<meta>/ltx/0/<txID>-<txID>.ltx`) rather than incremental level-0 + level-9 snapshots.
+> This is valid, contiguous, and restorable; it is space-inefficient vs litestream's incremental L0.
+> True incremental L0 (reading only changed WAL pages via `WALReader.pageMap` from the last synced
+> offset) and level-9 snapshots + compaction are the next milestone.
 
 > **Interop note (Milestone 1):** Go's `superfly/ltx` golden file-checksum vectors
 > (`0xe27f4c18f0da2c10`, `0xd926967672f7ca53`) are pinned in `test/ltx/golden.test.ts`. Our `lz4js`
@@ -423,7 +432,7 @@ Implement and unit-test, in order:
 - Atomic write leaves no `.tmp` on failure; `deleteLTXFiles` and `deleteAll` behave.
 - `FetchPageIndex` on our written file decodes a correct index map.
 
-### Milestone 4 — DB + Replica end-to-end replication (the MVP)
+### Milestone 4 — DB + Replica end-to-end replication (the MVP) ✅ DONE
 
 This is the core. Implement:
 
