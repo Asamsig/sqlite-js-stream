@@ -38,26 +38,23 @@ npm install sqlite-js-stream
 ## Quick start
 
 ```ts
-import { openDatabase, Replica, FileReplicaClient } from 'sqlite-js-stream';
+import { Replica, FileReplicaClient } from 'sqlite-js-stream';
 
-// 1. Open a database handle (driver-agnostic, returns a `Database`).
-const db = await openDatabase('/data/app.db');
-
-// 2. Choose a replica destination. A local directory is simplest.
+// 1. Point the replica at your database path and a replica destination.
+//    The library reads the database + `-wal` directly and is agnostic to
+//    whichever SQLite driver your application uses.
 const client = new FileReplicaClient('/data/replica');
+const replica = new Replica('/data/app.db', client);
 
-// 3. Wire the replica and replicate.
-const replica = new Replica(db, client);
-await db.sync();         // writes a local LTX file into <db>-litestream/ltx/0/
-await replica.sync();    // uploads it to the replica (file://.../ltx/0/...)
+// 2. Sync builds a local LTX file (into <db>-litestream/ltx/0/) and uploads it.
+await replica.sync();
 ```
 
-The database is written to by your own SQLite connection (or the same `DatabaseSync`). After more
-writes, just `sync()` again:
+The database is written to by your **own** SQLite connection (using `node:sqlite`, `better-sqlite3`,
+or anything else). After more writes, just `sync()` again:
 
 ```ts
-// ... your app writes rows via node:sqlite ...
-await db.sync();
+// ... your app writes rows with whatever driver you use ...
 await replica.sync();
 
 const status = await replica.syncStatus();
@@ -114,10 +111,10 @@ store.close();
 Replica clients are created from URLs via the factory registry:
 
 ```ts
-import { newReplicaClientFromURL, openDatabase, Replica } from 'sqlite-js-stream';
+import { newReplicaClientFromURL, Replica } from 'sqlite-js-stream';
 
 const client = newReplicaClientFromURL('file:///data/replica');
-const replica = new Replica(await openDatabase('/data/app.db'), client);
+const replica = new Replica('/data/app.db', client);
 ```
 
 ---

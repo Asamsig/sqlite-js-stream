@@ -14,10 +14,8 @@ export * from './wal/index.ts';
 export * from './replica-client.ts';
 export * from './replica-url.ts';
 export * from './backends/file/index.ts';
-// The `Database` interface keeps the replication layer driver-agnostic. The
-// concrete `node:sqlite`-backed `SQLiteDatabase` is intentionally NOT exported;
-// obtain a default via `openDatabase`.
-export type { Database } from './db.ts';
-export { openDatabase } from './db.ts';
+// The DB layer (`src/db.ts`) is intentionally NOT part of the public API.
+// `Replica`/`Store` take a database path and read the DB + WAL directly, so the
+// library is agnostic to whatever SQLite driver the application uses.
 export * from './replica.ts';
 export * from './store.ts';

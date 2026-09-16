@@ -1,9 +1,12 @@
 /**
- * Replica manages replication of a single database to a ReplicaClient.
+ * Replica manages replication of a single SQLite database (identified by its
+ * `path`) to a ReplicaClient.
  *
- * It uploads local level-0 LTX files to the client, tracks the replicated
- * position (the max maxTXID of level-0 files on the client), and can restore a
- * database by merging LTX files. Mirrors litestream's `replica.go`.
+ * It reads the database + WAL directly from disk, writes level-0/level-9 LTX
+ * files into a local cache, uploads them to the client, tracks the replicated
+ * position, and can restore a database by merging LTX files. Mirrors
+ * litestream's `replica.go`, but is agnostic to the SQLite driver the
+ * application uses (it never touches a connection).
  */
 
 import { access, mkdir, rename, writeFile } from 'node:fs/promises';
@@ -16,7 +19,7 @@ import {
   HeaderFlagNoChecksum,
   type FileInfo,
 } from './ltx/index.ts';
-import type { Database } from './db.ts';
+import { LocalDatabase } from './db.ts';
 import type { ReplicaClient } from './replica-client.ts';
 import { readAll } from './util/stream.ts';
 import type { Logger } from './util/logger.ts';
@@ -42,17 +45,26 @@ function chunks(data: Uint8Array, size = 256 * 1024): AsyncIterable<Uint8Array> 
   })();
 }
 
-/** Replica replicates a single database to a ReplicaClient. */
+/** Replica replicates a single database (by path) to a ReplicaClient. */
 export class Replica {
-  readonly db: Database;
+  readonly path: string;
   readonly client: ReplicaClient;
   private logger: Logger;
   private posValue: bigint | null = null;
+  private db: LocalDatabase | null = null;
 
-  constructor(db: Database, client: ReplicaClient, logger: Logger = noopLogger) {
-    this.db = db;
+  constructor(path: string, client: ReplicaClient, logger: Logger = noopLogger) {
+    this.path = path;
     this.client = client;
     this.logger = logger;
+  }
+
+  /** Lazily opens the local database reader (cached). */
+  private async localDb(): Promise<LocalDatabase> {
+    if (this.db === null) {
+      this.db = await LocalDatabase.open(this.path);
+    }
+    return this.db;
   }
 
   /** Pos returns the current replicated position (max level-0 maxTXID). */
@@ -72,16 +84,28 @@ export class Replica {
     return max;
   }
 
-  /** Sync uploads local L0 LTX files to the client, tracking position. */
-  async sync(): Promise<void> {
-    await this.client.init();
-    const pos = await this.pos();
-    const dbPos = await this.db.pos();
+  /** LocalPos returns the local cached position (max local level-0 maxTXID). */
+  async localPos(): Promise<bigint> {
+    return (await this.localDb()).pos();
+  }
 
-    for (let txID = pos + 1n; txID <= dbPos; txID = (await this.pos()) + 1n) {
+  /**
+   * Sync builds a level-0 LTX file locally (if there are new WAL changes) and
+   * uploads any pending local files to the client. Returns the file that was
+   * written locally, or null if there was nothing new to do.
+   */
+  async sync(): Promise<FileInfo | null> {
+    await this.client.init();
+    const db = await this.localDb();
+    const info = await db.sync();
+    const dbPos = await db.pos();
+    const remotePos = await this.pos();
+
+    for (let txID = remotePos + 1n; txID <= dbPos; txID = (await this.pos()) + 1n) {
       await this.uploadLtxFile(0, txID, txID);
       this.posValue = txID;
     }
+    return info;
   }
 
   /** SyncAndWait uploads all pending LTX files; harmless if already synced. */
@@ -91,7 +115,7 @@ export class Replica {
 
   /** Snapshot writes and uploads a level-9 full-database LTX file. */
   async snapshot(): Promise<void> {
-    const info = await this.db.snapshot();
+    const info = await (await this.localDb()).snapshot();
     if (info) {
       await this.uploadLtxFile(9, info.minTXID, info.maxTXID);
     }
@@ -99,14 +123,14 @@ export class Replica {
 
   /** SyncStatus reports the local and remote positions. */
   async syncStatus(): Promise<SyncStatus> {
-    const localTXID = await this.db.pos();
+    const localTXID = await this.localPos();
     const remoteTXID = await this.calcPos();
     return { localTXID, remoteTXID, inSync: localTXID === remoteTXID };
   }
 
   /** Uploads a single local LTX file to the client. */
   private async uploadLtxFile(level: number, minTXID: bigint, maxTXID: bigint): Promise<FileInfo> {
-    const p = this.db.ltxPath(level, minTXID, maxTXID);
+    const p = (await this.localDb()).ltxPath(level, minTXID, maxTXID);
     const buf = new Uint8Array(await import('node:fs/promises').then((f) => f.readFile(p)));
     const info = await this.client.writeLtxFile({ level, minTXID, maxTXID }, chunks(buf));
     this.logger.debug('ltx file uploaded', { level, minTXID, maxTXID, size: info.size });
@@ -116,12 +140,12 @@ export class Replica {
   /** EnsureExists restores the local database if it is missing. */
   async ensureExists(): Promise<void> {
     try {
-      await access(this.db.path);
+      await access(this.path);
       return;
     } catch {
       /* missing; restore below */
     }
-    await this.restore({ outputPath: this.db.path });
+    await this.restore({ outputPath: this.path });
   }
 
   /** Restore reconstructs a SQLite database at `outputPath` from LTX files. */
@@ -160,8 +184,6 @@ export class Replica {
     await writeFile(tmp, dbBytes.toBuffer());
     await rename(tmp, opt.outputPath);
   }
-
-
 }
 
 /**

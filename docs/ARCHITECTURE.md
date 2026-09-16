@@ -34,17 +34,17 @@ prevents the WAL from being checkpointed past our position.
 |-----------|----------------|
 | **LTX module** (`src/ltx/`) | Encode/decode LTX files; CRC-64 ISO checksums; LZ4 *block* codec; page index; compactor. |
 | **WAL module** (`src/wal/`) | Parse SQLite WAL header/frames; verify salt + checksum; produce `pageMap()` (latest committed page offsets). |
-| **Database** (`src/db.ts`) | The driver-agnostic interface the replication layer depends on (`pos`, `sync`, `snapshot`, `ltxPath`, `l0Files`). The bundled default, obtained via `openDatabase`, opens SQLite in WAL mode, reads pages from the DB file + WAL, builds LTX files (base snapshot, incremental L0, level-9 snapshot), and tracks the local position. Applications may supply their own implementation. |
+| **LocalDatabase** (`src/db.ts`, internal) | Reads a database + `-wal` directly from disk (no SQLite driver/connection), builds LTX files (base snapshot, incremental L0, level-9 snapshot), and tracks the local position. It is an internal implementation detail, not part of the public API. |
 | **Replica** (`src/replica.ts`) | Upload level-0/level-9 LTX files to a client; track the replicated position; `restore()`, `ensureExists()`, `syncStatus()`. |
 | **ReplicaClient** (`src/replica-client.ts`) | An interface to a storage backend (`LTXFiles`, `OpenLTXFile`, `WriteLTXFile`, `DeleteLTXFiles`, `DeleteAll`). |
 | **File backend** (`src/backends/file/`) | The simplest backend: store LTX files in `<root>/ltx/<level>/<min>-<max>.ltx`, atomic writes. |
-| **Store** (`src/store.ts`) | Coordinate multiple `DB`+`Replica` pairs. |
+| **Store** (`src/store.ts`) | Coordinate multiple `Replica`s. |
 
 ---
 
 ## Replication flow
 
-### DB.sync()
+### Replica.sync()
 
 1. Compute the next **transaction ID**: `txID = localPos + 1`, where `localPos` is the max
    `MaxTXID` among local level-0 LTX files.
@@ -61,7 +61,7 @@ prevents the WAL from being checkpointed past our position.
 > appears in the committed WAL page map, otherwise from the main database file. This is what makes
 > the read consistent with the pinned read snapshot without copying the whole database.
 
-### DB.snapshot()
+### Replica.snapshot()
 
 Writes a **level-9** full snapshot LTX file (`MinTXID = 1`, `MaxTXID = current position`) containing
 every committed page. Combined with incremental level-0 files this gives point-in-time restore.

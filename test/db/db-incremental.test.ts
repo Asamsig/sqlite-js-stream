@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-import { openDatabase, Decoder } from '../../src/index.ts';
+import { Decoder } from '../../src/index.ts';
+import { LocalDatabase } from '../../src/db.ts';
 import { createWALDB } from '../helpers/make-db.ts';
 
 function countPages(dec: Decoder): number {
@@ -19,7 +20,7 @@ function countPages(dec: Decoder): number {
 
 test('first sync is a base snapshot; later syncs are incremental', async () => {
   const t = createWALDB(['a', 'b', 'c', 'd', 'e']);
-  const db = await openDatabase(t.path);
+  const db = await LocalDatabase.open(t.path);
   try {
     const info1 = await db.sync();
     assert.equal(info1?.minTXID, 1n);
@@ -48,13 +49,12 @@ test('first sync is a base snapshot; later syncs are incremental', async () => {
     assert.ok(info2!.size < info1!.size, 'incremental file should be smaller');
   } finally {
     t.close();
-    db.close();
   }
 });
 
 test('txID files are contiguous (each min-1 equals previous max)', async () => {
   const t = createWALDB(['a', 'b', 'c']);
-  const db = await openDatabase(t.path);
+  const db = await LocalDatabase.open(t.path);
   try {
     await db.sync();
     t.db.exec("INSERT INTO t (name) VALUES ('d')");
@@ -67,6 +67,5 @@ test('txID files are contiguous (each min-1 equals previous max)', async () => {
     assert.deepEqual(files.map((f) => f.maxTXID), [1n, 2n, 3n]);
   } finally {
     t.close();
-    db.close();
   }
 });

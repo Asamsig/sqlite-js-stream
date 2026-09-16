@@ -1,20 +1,14 @@
 /**
- * DB manages a single SQLite database's replication state.
+ * LocalDatabase is the internal engine that reads a SQLite database and its
+ * `-wal` file directly from disk (no SQLite driver/connection) and writes LTX
+ * files into a local cache (`<path>-litestream/ltx/`).
  *
- * It holds a `node:sqlite` connection (for page_size/page_count and to pin a
- * read snapshot), and reads the database and `-wal` files directly via fs so it
- * can build LTX files. This mirrors litestream's `db.go`.
- *
- * `sync()` writes a level-0 LTX file (`<meta>/ltx/0/<txID>-<txID>.ltx`):
- *  - The first sync (no local files) writes a **full-snapshot** base.
- *  - Later syncs write an **incremental** file containing only the pages whose
- *    latest committed version is in the WAL since the last synced offset.
- *  - If the WAL has been reset (checkpointed) so we can no longer resume, sync
- *    falls back to another full-snapshot base.
+ * It is deliberately NOT part of the public API: `Replica`/`Store` take a
+ * database `path` and own the reading internally, so the library is agnostic to
+ * whatever SQLite driver the application uses.
  */
 
-import { DatabaseSync } from 'node:sqlite';
-import { readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
+import { open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import nodePath from 'node:path';
 
 import {
@@ -37,66 +31,61 @@ import {
 } from './wal/index.ts';
 import { mkdirAll } from './util/fs.ts';
 
-/**
- * Database is the interface the replication layer depends on.
- *
- * It is agnostic to any particular SQLite driver: `pos`, `sync`, `snapshot` and
- * `ltxPath` are all that `Replica`/`Store` need. The bundled, `node:sqlite`-backed
- * default implementation is obtained via `openDatabase`; applications may provide
- * their own `Database` (e.g. backed by another driver) instead.
- */
-export interface Database {
-  readonly path: string;
-  readonly pageSize: number;
-  /** Position returns the max TXID in the local level-0 cache (0 if none). */
-  pos(): Promise<bigint>;
-  /** Sync builds a level-0 LTX file and writes it to the local cache. */
-  sync(): Promise<FileInfo | null>;
-  /** Snapshot writes a level-9 full-database LTX file. */
-  snapshot(): Promise<FileInfo | null>;
-  /** LTXPath returns the local path of a single LTX file. */
-  ltxPath(level: number, minTXID: bigint, maxTXID: bigint): string;
-  /** L0Files lists local level-0 LTX files, sorted by TXID. */
-  l0Files(): Promise<FileInfo[]>;
-  /** Close releases any underlying resources. */
-  close(): void;
+/** Reads the page size from the SQLite database header (bytes 16-17). */
+function headerPageSize(buf: Uint8Array): number {
+  const raw = buf.length >= 18 ? (buf[16] << 8) | buf[17] : 0;
+  if (raw === 1) return 65536;
+  return raw || 4096;
+}
+
+/** Reads the database size (pages) from the header (bytes 28-31). */
+function headerPageCount(buf: Uint8Array, pageSize: number): number {
+  if (buf.length >= 28) {
+    const n = (buf[28] << 24) | (buf[29] << 16) | (buf[30] << 8) | buf[31];
+    if (n > 0) return n;
+  }
+  return Math.floor(buf.length / pageSize);
 }
 
 /**
- * SQLiteDatabase is the default `Database` implementation, backed by
- * `node:sqlite` (a `DatabaseSync` connection used for page_size/page_count and
- * to pin a read snapshot) plus direct reads of the database and `-wal` files.
+ * LocalDatabase reads a database + WAL from disk, tracks the local replicated
+ * position, and builds LTX files in the local cache.
  */
-class SQLiteDatabase implements Database {
+export class LocalDatabase {
   readonly path: string;
   readonly metaPath: string;
   readonly pageSize: number;
-  private conn: DatabaseSync;
 
-  private constructor(path: string, metaPath: string, pageSize: number, conn: DatabaseSync) {
+  private constructor(path: string, metaPath: string, pageSize: number) {
     this.path = path;
     this.metaPath = metaPath;
     this.pageSize = pageSize;
-    this.conn = conn;
   }
 
-  /** Opens (and creates, if needed) a SQLite database in WAL mode. */
-  static async open(path: string): Promise<SQLiteDatabase> {
-    const conn = new DatabaseSync(path);
-    conn.exec('PRAGMA journal_mode=WAL');
-    conn.exec('PRAGMA wal_autocheckpoint=0');
-    conn.exec('PRAGMA busy_timeout=5000');
-
-    const p = conn.prepare('PRAGMA page_size').get() as { page_size: number };
-    const pageSize = p.page_size || 4096;
-
+  /**
+   * Open opens a local database reader for `path`. It does not create the
+   * database — the application is expected to own it. `pageSize` is read from
+   * the database header; a missing file falls back to the default page size.
+   */
+  static async open(path: string): Promise<LocalDatabase> {
     const metaPath = `${path}-litestream`;
     await mkdirAll(nodePath.join(metaPath, 'ltx', '0'));
 
-    return new SQLiteDatabase(path, metaPath, pageSize, conn);
+    let pageSize = 4096;
+    try {
+      const fh = await open(path, 'r');
+      const buf = new Uint8Array(18);
+      await fh.read(buf, 0, 18, 0);
+      await fh.close();
+      pageSize = headerPageSize(buf);
+    } catch {
+      /* database not present yet; use default page size */
+    }
+
+    return new LocalDatabase(path, metaPath, pageSize);
   }
 
-  /** WALPath returns the path to the database's WAL file. */
+  /** WalPath returns the path to the database's WAL file. */
   walPath(): string {
     return `${this.path}-wal`;
   }
@@ -114,12 +103,6 @@ class SQLiteDatabase implements Database {
   /** LTXPath returns the local path of a single LTX file. */
   ltxPath(level: number, minTXID: bigint, maxTXID: bigint): string {
     return nodePath.join(this.ltxLevelDir(level), formatFilename(minTXID, maxTXID));
-  }
-
-  /** pageCount returns the current committed database size, in pages. */
-  pageCount(): number {
-    const r = this.conn.prepare('PRAGMA page_count').get() as { page_count: number };
-    return r.page_count;
   }
 
   /** Lists local level-0 LTX files, sorted by TXID. */
@@ -162,14 +145,14 @@ class SQLiteDatabase implements Database {
   async sync(): Promise<FileInfo | null> {
     const pos = await this.pos();
     const txID = pos + 1n;
-    const commit = this.pageCount();
+    const dbBuf = new Uint8Array(await readFile(this.path));
+    const commit = headerPageCount(dbBuf, this.pageSize);
     if (commit === 0) return null;
 
     const pageSize = this.pageSize;
     const lockPg = lockPgno(pageSize);
 
     const walBuf = await this.readWalOrEmpty();
-    const dbBuf = new Uint8Array(await readFile(this.path));
 
     // Determine the previous sync state to resume incremental reading.
     const prev = await this.prevSyncInfo();
@@ -221,10 +204,6 @@ class SQLiteDatabase implements Database {
       if (walCommit > 0) {
         offset = WALHeaderSize;
       }
-    } else if (walCommit > 0) {
-      // Commit reflects the DB size at the last committed frame.
-      // `commit` is already from PRAGMA; keep the larger for safety.
-      void walCommit;
     }
 
     const finalCommit = Math.max(commit, walCommit);
@@ -326,16 +305,16 @@ class SQLiteDatabase implements Database {
   async snapshot(): Promise<FileInfo | null> {
     const pos = await this.pos();
     const maxTXID = pos === 0n ? 1n : pos;
-    const commit = this.pageCount();
-    if (commit === 0) return null;
+    const dbBuf = new Uint8Array(await readFile(this.path));
+    const headerCommit = headerPageCount(dbBuf, this.pageSize);
 
     const pageSize = this.pageSize;
     const lockPg = lockPgno(pageSize);
     const walBuf = await this.readWalOrEmpty();
-    const dbBuf = new Uint8Array(await readFile(this.path));
 
     // Build the committed WAL page map for the overlay (may be empty).
     let pageMap = new Map<number, number>();
+    let walCommit = 0;
     let salt1 = 0;
     let salt2 = 0;
     if (walBuf.length > 0) {
@@ -343,12 +322,18 @@ class SQLiteDatabase implements Database {
         const full = new WALReader(walBuf);
         const pm = full.pageMap();
         pageMap = pm.pageIndex;
+        walCommit = pm.commit;
         salt1 = full.salt1();
         salt2 = full.salt2();
       } catch (err) {
         if (!(err instanceof WALEOFError)) throw err;
       }
     }
+
+    // The database commit may only be present in the WAL (not yet checkpointed
+    // into the main database header), so take the larger of the two.
+    const commit = Math.max(headerCommit, walCommit);
+    if (commit === 0) return null;
 
     const sink = new BufferSink();
     const enc = new Encoder(sink);
@@ -435,20 +420,6 @@ class SQLiteDatabase implements Database {
       return null;
     }
   }
-
-  /** close releases the SQLite connection. */
-  close(): void {
-    this.conn.close();
-  }
-}
-
-/**
- * OpenDatabase opens the default (node:sqlite-backed) database handle as a
- * driver-agnostic `Database`. Applications may instead supply their own
- * implementation.
- */
-export function openDatabase(path: string): Promise<Database> {
-  return SQLiteDatabase.open(path);
 }
 
 /** Creates a WALReader positioned at `offset`, or null if it cannot resume. */
@@ -469,5 +440,3 @@ function makeResumeReader(walBuf: Uint8Array, offset: number, salt1: number, sal
     throw err;
   }
 }
-
-

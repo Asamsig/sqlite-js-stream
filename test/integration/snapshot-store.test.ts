@@ -4,7 +4,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 
 import {
-  openDatabase,
   FileReplicaClient,
   Replica,
   Store,
@@ -14,15 +13,14 @@ import { createWALDB, makeTempDir } from '../helpers/make-db.ts';
 
 test('level-9 snapshot becomes the restore base', async () => {
   const t = createWALDB(['a', 'b', 'c']);
-  const db = await openDatabase(t.path);
   const client = new FileReplicaClient(makeTempDir('repl-'));
-  const replica = new Replica(db, client);
+  const replica = new Replica(t.path, client);
   try {
-    await db.sync();
+    await replica.sync();
     t.db.exec("INSERT INTO t (name) VALUES ('d')");
-    await db.sync();
+    await replica.sync();
     t.db.exec("INSERT INTO t (name) VALUES ('e')");
-    await db.sync();
+    await replica.sync();
 
     await replica.snapshot();
 
@@ -43,7 +41,6 @@ test('level-9 snapshot becomes the restore base', async () => {
     restored.close();
   } finally {
     t.close();
-    db.close();
   }
 });
 
@@ -59,8 +56,8 @@ test('Store opens, syncs, and closes multiple databases', async () => {
 
     await store.syncAll();
 
-    const r1 = store.replicas()[0].replica;
-    const r2 = store.replicas()[1].replica;
+    const r1 = store.replicas()[0];
+    const r2 = store.replicas()[1];
     assert.equal((await r1.syncStatus()).inSync, true);
     assert.equal((await r2.syncStatus()).inSync, true);
 
