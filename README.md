@@ -149,6 +149,64 @@ replica.run({ intervalMs: 1000, signal: ac.signal }).catch((err) => {
 `Store` also exposes `syncAll()`/`snapshotAll()` for one-shot operations; a continuous
 loop can be driven by calling `replica.run()` per database, or via your own scheduler.
 
+### Replication from a worker thread
+
+Run `replica.run()` in a **worker thread** so continuous replication doesn't compete with
+your application's main thread. The worker opens its own **read-only** connection (via the
+library) and reads the database + `-wal` files, while your app keeps writing from the main
+thread on its own connection. Only the **path**s need to cross threads.
+
+`replica-worker.ts`:
+
+```ts
+import { parentPort } from 'node:worker_threads';
+import { Replica, FileReplicaClient } from 'sqlite-js-stream';
+
+parentPort.on('message', async (msg) => {
+  if (msg?.type !== 'start') return;
+  const { dbPath, clientPath, intervalMs = 1000 } = msg;
+
+  const replica = new Replica(dbPath, new FileReplicaClient(clientPath));
+  const ac = new AbortController();
+  const runP = replica.run({ intervalMs, signal: ac.signal });
+
+  parentPort.postMessage({ type: 'started' });
+  parentPort.on('message', async (m) => {
+    if (m?.type === 'stop') {
+      ac.abort();
+      await runP;
+      parentPort.postMessage({ type: 'done' });
+    }
+  });
+});
+```
+
+Main thread:
+
+```ts
+import { Worker } from 'node:worker_threads';
+
+const worker = new Worker(new URL('./replica-worker.ts', import.meta.url));
+const started = new Promise((resolve) => worker.on('message', (m) => m?.type === 'started' && resolve()));
+const done = new Promise((resolve) => worker.on('message', (m) => m?.type === 'done' && resolve()));
+
+worker.postMessage({ type: 'start', dbPath: '/data/app.db', clientPath: '/data/replica', intervalMs: 1000 });
+await started;
+
+// Your app keeps using node:sqlite (or better-sqlite3) from the main thread.
+// ... write rows ...
+
+// Shut the replication worker down gracefully.
+worker.postMessage({ type: 'stop' });
+await done;
+await worker.terminate();
+```
+
+> **Important:** the worker and your app each use their **own** connection to the same database
+> file. Never hand the worker the same `DatabaseSync` handle your app writes with — a single
+> connection holds one transaction at a time, so sharing a writable handle would merge the read
+> snapshot with your writes (see *Concurrency & snapshot consistency* above).
+
 ---
 
 ## How it works
