@@ -27,11 +27,22 @@ No build step. Test files and source run directly under Node.
 
 ## Installation
 
+This repository is a **pnpm workspace**. The core library lives at the root and
+upload strategies (replica backends) live under `packages/`:
+
 ```bash
-npm install sqlite-js-stream
+pnpm install       # link the workspace
 ```
 
-*(Not yet published; install from the repository.)*
+There is no build step: we run TypeScript directly via Node's native type
+stripping.
+
+The core package is published as `sqlite-js-stream` *(not yet published; install
+from the repository)*, and each addon is a separate package:
+
+```bash
+pnpm add sqlite-js-stream sqlite-js-stream-backend-s3
+```
 
 ---
 
@@ -116,6 +127,43 @@ import { newReplicaClientFromURL, Replica } from 'sqlite-js-stream';
 const client = newReplicaClientFromURL('file:///data/replica');
 const replica = new Replica('/data/app.db', client);
 ```
+
+The `file` scheme is built into the core. Additional schemes (S3, etc.) are
+registered by importing the matching addon (see below).
+
+### S3 upload strategy
+
+The `sqlite-js-stream-backend-s3` addon provides an S3 replica client. Import it
+once to register the `s3://` scheme, then create clients from URLs or directly:
+
+```ts
+import { Replica, newReplicaClientFromURL } from 'sqlite-js-stream';
+import { S3ReplicaClient } from 'sqlite-js-stream-backend-s3';
+
+// Via a URL (bucket from the host, prefix from the path).
+const client = newReplicaClientFromURL('s3://my-bucket/backup?region=us-east-1');
+
+// Or directly, with explicit AWS config.
+const s3 = new S3ReplicaClient({
+  bucket: 'my-bucket',
+  prefix: 'backup',
+  region: 'us-east-1',
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+});
+
+const replica = new Replica('/data/app.db', client);
+await replica.run({ intervalMs: 1000 });
+```
+
+Objects are stored as `{prefix}/ltx/{level}/{minTXID}-{maxTXID}.ltx` — the same
+layout as the file backend, so a replica can move between strategies. Creation
+timestamps are preserved as the `ltx-timestamp` object metadata.
+
+> **Testing without AWS:** `S3ReplicaClient` accepts an injected `client`
+> implementing `send(command)`. Pass an in-memory fake (see
+> `packages/backend-s3/test/helpers/memory-s3.ts`) to exercise the addon without
+> network access.
 
 ### Continuous sync
 

@@ -36,9 +36,14 @@ prevents the WAL from being checkpointed past our position.
 | **WAL module** (`src/wal/`) | Parse SQLite WAL header/frames; verify salt + checksum; produce `pageMap()` (latest committed page offsets). |
 | **LocalDatabase** (`src/db.ts`, internal) | Reads a database + `-wal` directly from disk, builds LTX files (base snapshot, incremental L0, level-9 snapshot), and tracks the local position. It holds a short-lived **read-only** `node:sqlite` read transaction to **pin the WAL snapshot** (SQLite won't checkpoint/truncate past an active reader), then reads the files via `fs`. It is an internal implementation detail, not part of the public API. |
 | **Replica** (`src/replica.ts`) | Upload level-0/level-9 LTX files to a client; track the replicated position; `restore()`, `ensureExists()`, `syncStatus()`. |
-| **ReplicaClient** (`src/replica-client.ts`) | An interface to a storage backend (`LTXFiles`, `OpenLTXFile`, `WriteLTXFile`, `DeleteLTXFiles`, `DeleteAll`). |
+| **ReplicaClient** (`src/replica-client.ts`) | An interface to a storage backend (`LTXFiles`, `OpenLTXFile`, `WriteLTXFile`, `DeleteLTXFiles`, `DeleteAll`). Addons implement this to add upload strategies. |
 | **File backend** (`src/backends/file/`) | The simplest backend: store LTX files in `<root>/ltx/<level>/<min>-<max>.ltx`, atomic writes. |
 | **Store** (`src/store.ts`) | Coordinate multiple `Replica`s. |
+| **Addons** (`packages/`) | Upload strategies live as separate workspace packages. Each addon depends on the core `sqlite-js-stream` and registers a URL scheme (e.g. `packages/backend-s3` registers `s3://`). |
+
+> The repository is a **pnpm workspace**: the core package is at the root and
+> upload-strategy addons live under `packages/*`. Addons import the `ReplicaClient`
+> contract (and `registerReplicaClientFactory`) from the core.
 
 ---
 
