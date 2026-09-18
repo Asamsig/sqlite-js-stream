@@ -7,6 +7,15 @@
     "node": ">=24"
   },
   "license": "Apache-2.0",
+  "author": "Matteo Collina",
+  "homepage": "https://github.com/platformatic/sqlite-js-stream",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/platformatic/sqlite-js-stream.git"
+  },
+  "bugs": {
+    "url": "https://github.com/platformatic/sqlite-js-stream/issues"
+  },
   "scripts": {
     "test": "node --test 'test/**/*.test.ts'",
     "typecheck": "tsc -p . --noEmit"
