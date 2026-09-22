@@ -16,12 +16,16 @@ import { Readable } from 'node:stream';
 
 import {
   S3Client,
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
+  UploadPartCommand,
 } from '@aws-sdk/client-s3';
 
 import {
@@ -84,6 +88,9 @@ function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
   }
   return out;
 }
+
+/** S3 requires every multipart part (except the last) to be at least 5 MiB. */
+const MULTIPART_MIN_PART_SIZE = 5 * 1024 * 1024;
 
 /** S3ReplicaClient writes LTX files to an Amazon S3 bucket. */
 export class S3ReplicaClient implements ReplicaClient {
@@ -220,57 +227,128 @@ export class S3ReplicaClient implements ReplicaClient {
   }
 
   async writeLtxFile(opts: WriteLTXFileOptions, body: AsyncIterable<Uint8Array | string>): Promise<FileInfo> {
-    const chunks: Uint8Array[] = [];
-    let headerBytes: Uint8Array | null = null;
-    let pending: Uint8Array[] = [];
-    let pendingLen = 0;
-    let size = 0;
-
-    for await (const chunk of body) {
-      const bytes =
-        typeof chunk === 'string' ? new TextEncoder().encode(chunk) : Uint8Array.from(chunk);
-      if (headerBytes === null) {
-        pending.push(bytes);
-        pendingLen += bytes.length;
-        if (pendingLen >= HeaderSize) {
-          const concat = concatBytes(pending);
-          headerBytes = concat.subarray(0, HeaderSize);
-          pending = [];
-          pendingLen = 0;
-        }
-      }
-      chunks.push(bytes);
-      size += bytes.length;
-    }
-
-    if (headerBytes === null) {
-      throw new Error('write ltx file: input too short to contain a header');
-    }
-    const timestamp = Number(unmarshalHeader(headerBytes).timestamp);
-    const buf = concatBytes(chunks);
     const key = this.fileKey(opts.level, opts.minTXID, opts.maxTXID);
 
-    try {
-      await this.client.send(
-        new PutObjectCommand({
+    // Capture the LTX header (timestamp) from the leading bytes, and stream the
+    // rest. Small objects use a single PutObject; large objects (> 5 MiB) are
+    // uploaded with the multipart API so the whole file is never buffered.
+    let headerBytes: Uint8Array | null = null;
+    let head: Uint8Array[] = [];
+    let headLen = 0;
+
+    let acc: Uint8Array[] = [];
+    let accLen = 0;
+    let size = 0;
+
+    let uploadId: string | null = null;
+    let partNumber = 0;
+    const uploadedParts: Array<{ PartNumber: number; ETag: string }> = [];
+
+    const uploadPart = async (buf: Uint8Array): Promise<void> => {
+      partNumber++;
+      const res = await this.client.send(
+        new UploadPartCommand({
           Bucket: this.bucket,
           Key: key,
+          UploadId: uploadId!,
+          PartNumber: partNumber,
           Body: buf,
-          ContentLength: size,
-          Metadata: { 'ltx-timestamp': String(timestamp) },
         }),
       );
+      uploadedParts.push({ PartNumber: partNumber, ETag: res.ETag ?? `etag-${partNumber}` });
+    };
+
+    try {
+      for await (const chunk of body) {
+        const bytes =
+          typeof chunk === 'string' ? new TextEncoder().encode(chunk) : Uint8Array.from(chunk);
+        if (bytes.length === 0) continue;
+        size += bytes.length;
+
+        if (headerBytes === null) {
+          head.push(bytes);
+          headLen += bytes.length;
+          if (headLen >= HeaderSize) {
+            headerBytes = concatBytes(head).subarray(0, HeaderSize);
+            head = [];
+            headLen = 0;
+          }
+        }
+
+        acc.push(bytes);
+        accLen += bytes.length;
+
+        if (uploadId === null && accLen >= MULTIPART_MIN_PART_SIZE) {
+          const res = await this.client.send(
+            new CreateMultipartUploadCommand({
+              Bucket: this.bucket,
+              Key: key,
+              Metadata: { 'ltx-timestamp': String(Number(unmarshalHeader(headerBytes!).timestamp)) },
+            }),
+          );
+          uploadId = res.UploadId;
+          await uploadPart(concatBytes(acc));
+          acc = [];
+          accLen = 0;
+        } else if (uploadId !== null && accLen >= MULTIPART_MIN_PART_SIZE) {
+          await uploadPart(concatBytes(acc));
+          acc = [];
+          accLen = 0;
+        }
+      }
+
+      if (headerBytes === null) {
+        throw new Error('write ltx file: input too short to contain a header');
+      }
+      const timestamp = Number(unmarshalHeader(headerBytes).timestamp);
+      const metadata = { 'ltx-timestamp': String(timestamp) };
+
+      if (uploadId === null) {
+        // Single PutObject for small objects.
+        const buf = concatBytes(acc);
+        await this.client.send(
+          new PutObjectCommand({
+            Bucket: this.bucket,
+            Key: key,
+            Body: buf,
+            ContentLength: size,
+            Metadata: metadata,
+          }),
+        );
+      } else {
+        // Multipart: upload any remaining bytes as the final part, then complete.
+        if (accLen > 0) await uploadPart(concatBytes(acc));
+        await this.client.send(
+          new CompleteMultipartUploadCommand({
+            Bucket: this.bucket,
+            Key: key,
+            UploadId: uploadId,
+            MultipartUpload: { Parts: uploadedParts },
+          }),
+        );
+      }
+
+      return {
+        level: opts.level,
+        minTXID: opts.minTXID,
+        maxTXID: opts.maxTXID,
+        size,
+        createdAt: timestamp,
+      };
     } catch (err) {
+      if (uploadId !== null) {
+        await this.client
+          .send(
+            new AbortMultipartUploadCommand({
+              Bucket: this.bucket,
+              Key: key,
+              UploadId: uploadId,
+            }),
+          )
+          .catch(() => {});
+      }
       throw new LTXError('write', key, opts.level, opts.minTXID, opts.maxTXID, err);
     }
-
-    return {
-      level: opts.level,
-      minTXID: opts.minTXID,
-      maxTXID: opts.maxTXID,
-      size,
-      createdAt: timestamp,
-    };
   }
 
   async deleteLtxFiles(infos: FileInfo[]): Promise<void> {

@@ -4,14 +4,19 @@
  * {@link S3ReplicaClient}. Objects live in a Map keyed by `bucket/key`.
  */
 
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
+  UploadPartCommand,
 } from '@aws-sdk/client-s3';
 
 interface StoredObject {
@@ -20,8 +25,24 @@ interface StoredObject {
   lastModified: Date;
 }
 
+interface MultipartUpload {
+  bucket: string;
+  key: string;
+  parts: Map<number, Buffer>;
+  metadata: Record<string, string>;
+}
+
+/** Normalizes an SDK Body value to a Buffer. */
+function toBuffer(raw: unknown): Buffer {
+  if (Buffer.isBuffer(raw)) return Buffer.from(raw);
+  if (raw instanceof Uint8Array) return Buffer.from(raw);
+  if (raw !== undefined && raw !== null) return Buffer.from(String(raw));
+  return Buffer.alloc(0);
+}
+
 export class MemoryS3 {
   readonly objects = new Map<string, StoredObject>();
+  readonly multiparts = new Map<string, MultipartUpload>();
 
   async send(command: any): Promise<any> {
     if (command instanceof ListObjectsV2Command) {
@@ -42,7 +63,58 @@ export class MemoryS3 {
     if (command instanceof HeadBucketCommand) {
       return {};
     }
+    if (command instanceof CreateMultipartUploadCommand) {
+      return this.createMultipart(command);
+    }
+    if (command instanceof UploadPartCommand) {
+      return this.uploadPart(command);
+    }
+    if (command instanceof CompleteMultipartUploadCommand) {
+      return this.completeMultipart(command);
+    }
+    if (command instanceof AbortMultipartUploadCommand) {
+      return this.abortMultipart(command);
+    }
     throw new Error(`MemoryS3: unsupported command ${command?.constructor?.name}`);
+  }
+
+  private createMultipart(cmd: any) {
+    const uploadId = `upload-${this.multiparts.size + 1}`;
+    this.multiparts.set(uploadId, {
+      bucket: cmd.input.Bucket,
+      key: cmd.input.Key,
+      parts: new Map(),
+      metadata: cmd.input.Metadata ?? {},
+    });
+    return { UploadId: uploadId };
+  }
+
+  private uploadPart(cmd: any) {
+    const mp = this.multiparts.get(cmd.input.UploadId);
+    if (!mp) throw notFound(cmd.input.UploadId);
+    const body = toBuffer(cmd.input.Body);
+    mp.parts.set(cmd.input.PartNumber, body);
+    return { ETag: `fake-etag-${cmd.input.PartNumber}` };
+  }
+
+  private completeMultipart(cmd: any) {
+    const mp = this.multiparts.get(cmd.input.UploadId);
+    if (!mp) throw notFound(cmd.input.UploadId);
+    const partNumbers = [...mp.parts.keys()].sort((a, b) => a - b);
+    const chunks = partNumbers.map((n) => mp.parts.get(n)!);
+    const body = Buffer.concat(chunks);
+    this.objects.set(this.key(mp.bucket, mp.key), {
+      body,
+      metadata: mp.metadata,
+      lastModified: new Date(),
+    });
+    this.multiparts.delete(cmd.input.UploadId);
+    return { ETag: fakeEtag(body), Key: mp.key };
+  }
+
+  private abortMultipart(cmd: any) {
+    this.multiparts.delete(cmd.input.UploadId);
+    return {};
   }
 
   private key(bucket: string, key: string): string {
@@ -129,4 +201,8 @@ function notFound(key: string): Error {
   const err = new Error(`Not Found: ${key}`);
   (err as any).name = 'NotFound';
   return err;
+}
+
+function fakeEtag(body: Buffer): string {
+  return `"${createHash('md5').update(body).digest('hex')}"`;
 }

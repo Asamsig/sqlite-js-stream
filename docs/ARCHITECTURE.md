@@ -83,11 +83,15 @@ sync error is logged and the loop keeps going.
 
 1. `CalcRestorePlan` picks the latest **level-9 snapshot** at or before the target TXID, then the
    contiguous **level-0** files after it.
-2. Each file is opened via `ReplicaClient.openLtxFile`.
-3. A **Compactor** merges all readers, letting later files override earlier ones per page, producing
-   a single snapshot-style LTX stream.
-4. `Decoder.decodeDatabaseTo` writes out the reconstructed SQLite database page-by-page (the
-   lock page is left zero-filled).
+2. Each file is opened via `ReplicaClient.openLtxFile` and decoded with a **streaming** LTX reader
+   (`StreamLtxReader`), so the whole file is never held in memory.
+3. The snapshot's pages are streamed into the output file in order (the lock page is written as
+   zeros). Each later level-0 file's pages are then **overlaid** at their page offsets, so a later
+   version of a page wins.
+4. The output file is truncated to the last file's committed page count and atomically renamed.
+
+Because restore never materializes the full merged LTX (or the whole DB) in memory, peak memory is
+bounded by one page buffer plus the (small) page index, regardless of the database size.
 
 ---
 
@@ -121,8 +125,11 @@ left off, even after a restart.
   read uncommitted rows) and would prevent it from `BEGIN`-ing its pin if the app already had a
   transaction open. The app's writer and the library's reader must be separate connections to the
   same database file.
-- Reads are done with the whole DB/WAL file for MVP tests; large databases should stream page-by-page
-  from file handles.
+- **Streaming for large databases.** `sync()`/`snapshot()` read database pages from a file handle one
+  at a time and stream the encoded LTX straight to a temp file (`FileSink`), instead of buffering the
+  whole DB/WAL. `restore()` streams pages into the output DB rather than buffering every LTX file. The
+  S3 addon uploads objects larger than 5 MiB with the multipart API so the upload is never buffered
+  either. The WAL is still read in full (it is small relative to the database).
 - LZ4 uses `lz4js` (pure JS **block** format), which is interoperable for **decompression** but not
   byte-identical to Go's `pierrec/lz4/v4`. Files written here are readable by Litestream and
   vice-versa.

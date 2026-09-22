@@ -16,20 +16,14 @@
  * writer and the library's reader on separate connections to the same file.
  */
 
-import { access, mkdir, rename, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { access, mkdir, open, rename, rm, type FileHandle } from 'node:fs/promises';
 import nodePath from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import {
-  BufferSink,
-  Compactor,
-  Decoder,
-  HeaderFlagNoChecksum,
-  type FileInfo,
-} from './ltx/index.ts';
+import { lockPgno, StreamLtxReader, type FileInfo } from './ltx/index.ts';
 import { LocalDatabase } from './db.ts';
 import type { ReplicaClient } from './replica-client.ts';
-import { readAll } from './util/stream.ts';
 import type { Logger } from './util/logger.ts';
 import { noopLogger } from './util/logger.ts';
 
@@ -50,14 +44,6 @@ export interface ReplicaRunOptions {
   intervalMs?: number;
   /** Abort to stop continuous syncing. */
   signal?: AbortSignal;
-}
-
-function chunks(data: Uint8Array, size = 256 * 1024): AsyncIterable<Uint8Array> {
-  return (async function* () {
-    for (let i = 0; i < data.length; i += size) {
-      yield data.subarray(i, i + size);
-    }
-  })();
 }
 
 /** Replica replicates a single database (by path) to a ReplicaClient. */
@@ -169,8 +155,9 @@ export class Replica {
   /** Uploads a single local LTX file to the client. */
   private async uploadLtxFile(level: number, minTXID: bigint, maxTXID: bigint): Promise<FileInfo> {
     const p = (await this.localDb()).ltxPath(level, minTXID, maxTXID);
-    const buf = new Uint8Array(await import('node:fs/promises').then((f) => f.readFile(p)));
-    const info = await this.client.writeLtxFile({ level, minTXID, maxTXID }, chunks(buf));
+    // Stream the local LTX file straight to the client (no whole-file buffer).
+    const body = createReadStream(p) as unknown as AsyncIterable<Uint8Array>;
+    const info = await this.client.writeLtxFile({ level, minTXID, maxTXID }, body);
     this.logger.debug('ltx file uploaded', { level, minTXID, maxTXID, size: info.size });
     return info;
   }
@@ -193,34 +180,79 @@ export class Replica {
     const plan = await calcRestorePlan(this.client, opt.txID ?? 0n);
     if (plan.length === 0) throw new Error('no matching backup files available');
 
-    // Read each LTX file into memory (MVP; streaming readers come later).
-    const readers: Uint8Array[] = [];
-    for (const info of plan) {
-      const rc = await this.client.openLtxFile({
-        level: info.level,
-        minTXID: info.minTXID,
-        maxTXID: info.maxTXID,
-        offset: 0,
-        size: 0,
-      });
-      readers.push(await readAll(rc));
-    }
-
-    // Compact all files into one LTX snapshot stream, then decode to a DB.
-    const merged = new BufferSink();
-    const compactor = new Compactor(merged, readers);
-    compactor.headerFlags = HeaderFlagNoChecksum;
-    compactor.compact();
-
-    const dbBytes = new BufferSink();
-    const dec = new Decoder(merged.toBuffer());
-    dec.decodeDatabaseTo(dbBytes);
-
-    // Atomically write the output database.
     await mkdir(nodePath.dirname(opt.outputPath), { recursive: true });
     const tmp = `${opt.outputPath}.tmp`;
-    await writeFile(tmp, dbBytes.toBuffer());
-    await rename(tmp, opt.outputPath);
+
+    let fh: FileHandle | null = null;
+    const sources: Array<{ destroy?: () => void }> = [];
+    try {
+      fh = await open(tmp, 'w');
+
+      // The first plan file is the base (a snapshot). Stream its pages
+      // sequentially into the output, then overlay each later file's pages by
+      // offset, so a later version of a page wins. Peak memory stays bounded by
+      // one page buffer + the (small) page index, never the whole DB.
+      const openReader = (info: FileInfo): Promise<StreamLtxReader> => this.openStreamReader(info, sources);
+
+      const base = await openReader(plan[0]);
+      await base.readHeader();
+      let pageSize = base.Header().pageSize;
+      let commit = base.Header().commit;
+      await writeSnapshotToFile(fh, base, pageSize, commit);
+      await base.verify();
+
+      for (let i = 1; i < plan.length; i++) {
+        const reader = await openReader(plan[i]);
+        await reader.readHeader();
+        const hdr = reader.Header();
+        if (hdr.pageSize !== pageSize) {
+          throw new Error(`mismatched page sizes: ${pageSize} != ${hdr.pageSize}`);
+        }
+        commit = hdr.commit;
+        await overlayPagesToFile(fh, reader, pageSize);
+        await reader.verify();
+      }
+
+      // The final database size is the last file's committed page count.
+      await fh.truncate(commit * pageSize);
+      await fh.sync();
+      await fh.close();
+      fh = null;
+
+      await rename(tmp, opt.outputPath);
+    } catch (err) {
+      if (fh !== null) await fh.close().catch(() => {});
+      await rm(tmp, { force: true }).catch(() => {});
+      throw err;
+    } finally {
+      // Release any not-yet-drained input streams (avoids leaking fds/connections
+      // on a corrupt/truncated backup). Destroying an ended stream is a no-op.
+      for (const s of sources) {
+        try {
+          s.destroy?.();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  /** Opens a streaming LTX reader over a plan file from the client. */
+  private async openStreamReader(
+    info: FileInfo,
+    sources?: Array<{ destroy?: () => void }>,
+  ): Promise<StreamLtxReader> {
+    const rc = await this.client.openLtxFile({
+      level: info.level,
+      minTXID: info.minTXID,
+      maxTXID: info.maxTXID,
+      offset: 0,
+      size: 0,
+    });
+    if (sources && typeof (rc as { destroy?: unknown }).destroy === 'function') {
+      sources.push({ destroy: () => (rc as { destroy: () => void }).destroy() });
+    }
+    return new StreamLtxReader(rc as unknown as AsyncIterable<Uint8Array>);
   }
 
   /** Close releases any internal database connection. */
@@ -277,4 +309,69 @@ export async function calcRestorePlan(
     throw new Error('no matching backup files available');
   }
   return plan;
+}
+
+/**
+ * Streams a snapshot's pages (1..commit) into the output file. The lock page
+ * is written as a zeroed page (SQLite requires it to exist but never uses it).
+ */
+async function writeSnapshotToFile(
+  fh: FileHandle,
+  reader: StreamLtxReader,
+  pageSize: number,
+  commit: number,
+): Promise<void> {
+  const lockPg = lockPgno(pageSize);
+  const page = new Uint8Array(pageSize);
+  const zero = new Uint8Array(pageSize);
+
+  for (let pgno = 1; pgno <= commit; pgno++) {
+    if (pgno === lockPg) {
+      await writeAllAt(fh, zero, (pgno - 1) * pageSize);
+      continue;
+    }
+    const hdr = await reader.readPage(page);
+    if (hdr === null) throw new Error(`unexpected end of pages at pgno ${pgno}`);
+    if (hdr.pgno !== pgno) {
+      throw new Error(`unexpected pgno while decoding page: read ${hdr.pgno}, expected ${pgno}`);
+    }
+    await writeAllAt(fh, page, (pgno - 1) * pageSize);
+  }
+
+  // Expect one final read to be the end-of-pages marker.
+  if ((await reader.readPage(page)) !== null) {
+    throw new Error('unexpected page after end of database');
+  }
+}
+
+/** Overlays an incremental file's pages into the output file at their offsets. */
+async function overlayPagesToFile(
+  fh: FileHandle,
+  reader: StreamLtxReader,
+  pageSize: number,
+): Promise<void> {
+  const page = new Uint8Array(pageSize);
+  for (;;) {
+    const hdr = await reader.readPage(page);
+    if (hdr === null) break;
+    await writeAllAt(fh, page, (hdr.pgno - 1) * pageSize);
+  }
+}
+
+/** Writes all of `bytes` to `handle` at an absolute `position`, looping on partial writes. */
+async function writeAllAt(
+  handle: FileHandle,
+  bytes: Uint8Array,
+  position: number,
+): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const { bytesWritten } = await handle.write(
+      bytes,
+      offset,
+      bytes.length - offset,
+      position + offset,
+    );
+    offset += bytesWritten;
+  }
 }

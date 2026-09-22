@@ -16,6 +16,7 @@ export * from './trailer.ts';
 export * from './sink.ts';
 export * from './encoder.ts';
 export * from './decoder.ts';
+export * from './stream.ts';
 export * from './compactor.ts';
 export * from './file-info.ts';
 

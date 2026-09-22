@@ -508,9 +508,12 @@ contiguous TXIDs; retention prunes old L0; restore still correct after compactio
    file). Ensure we reconstruct `WALOffset`/salts on restart exactly.
 6. **Type stripping limits.** No `enum`/decorators/parameter properties; use `import type`; explicit
    `.ts` extensions. Add a lint guard (eslint rule or tsconfig) to prevent violations.
-7. **Memory/perf on large DBs.** Streaming is important (read page-by-page, not whole-DB into
-   memory). Use `fs.promises` reads at offsets; consider `@platformatic/dynamic-buffer`. Validate
-   with a >1 GB DB (lock-page path) in Milestone 4/5.
+7. **Memory/perf on large DBs.** ✅ **Streaming implemented (post-MVP).** `restore()` streams each
+   LTX file page-by-page into the output DB (snapshot base + incremental overlay) and
+   `sync()`/`snapshot()` read pages from a file handle and stream the encoded LTX straight to disk
+   (`FileSink`); the S3 addon uses multipart upload for objects > 5 MiB. Peak memory is bounded by
+   one page buffer + the smallest page index. The WAL is still read in full (it is small relative
+   to the DB), and a >1 GB lock-page validation is a further stretch goal.
 
 ---
 

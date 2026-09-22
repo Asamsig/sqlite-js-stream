@@ -59,6 +59,13 @@ async function* iter(data: Uint8Array): AsyncIterable<Uint8Array> {
   yield data;
 }
 
+/** Yields `data` in fixed-size slices, so multipart uploads span parts. */
+async function* iterChunks(data: Uint8Array, chunkSize: number): AsyncIterable<Uint8Array> {
+  for (let i = 0; i < data.length; i += chunkSize) {
+    yield data.subarray(i, i + chunkSize);
+  }
+}
+
 function makeS3(opts: Partial<S3ReplicaClientOptions> & { bucket: string }): {
   client: S3ReplicaClient;
   s3: MemoryS3;
@@ -262,6 +269,28 @@ test('newReplicaClientFromURL parses s3 URLs and registers the scheme', () => {
   assert.equal(s3.bucket, 'mybucket');
   assert.equal(s3.prefix, 'some/prefix');
   assert.equal(s3.type(), 's3');
+});
+
+test('writeLtxFile streams a large object via multipart upload', async () => {
+  const { client, s3 } = makeS3({ bucket: 'b', prefix: 'backup' });
+  // Larger than the 5 MiB multipart threshold, fed in 1 MiB chunks so the
+  // upload spans multiple parts (5 MiB part + remainder).
+  const { body, timestamp } = makeLtxBody(5 * 1024 * 1024 + 777);
+  const info = await client.writeLtxFile(
+    { level: 9, minTXID: 1n, maxTXID: 99n },
+    iterChunks(body, 1024 * 1024),
+  );
+
+  assert.equal(info.size, body.length);
+  assert.equal(info.createdAt, timestamp);
+  assert.equal(s3.multiparts.size, 0, 'multipart upload should have completed');
+
+  const stored = s3.objects.get('b/backup/ltx/9/0000000000000001-0000000000000063.ltx');
+  assert.ok(stored, 'large object should be stored');
+  assert.equal(stored.body.length, body.length);
+  assert.equal(stored.metadata['ltx-timestamp'], String(timestamp));
+  // The concatenated parts must reproduce the exact input bytes.
+  assert.deepEqual(stored.body, Buffer.from(body));
 });
 
 test('integrates with Replica.sync() then restore() via S3', async () => {

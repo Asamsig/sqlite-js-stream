@@ -295,6 +295,18 @@ Your application is free to use its own SQLite driver and connections (`node:sql
 > own read-only reader instead. Keep the library's reader and your app's writer on separate
 > connections to the same database file.
 
+### Large databases & streaming
+
+The replication path is **streaming** end-to-end, so peak memory is bounded by one page buffer
+(plus the small LTX page index) rather than the database size:
+
+- `sync()`/`snapshot()` read database **pages one at a time from a file handle** and stream the
+  encoded LTX straight to a temp file (never buffering the whole DB/WAL).
+- `restore()` streams each LTX file's pages into the output database, overlaying incremental files
+  on the snapshot base — it never materializes a full merged file or the whole DB in memory.
+- The S3 addon uploads objects larger than **5 MiB** with the **multipart** API, so a large snapshot
+  is never buffered on the upload side either.
+
 ---
 
 ## Documentation

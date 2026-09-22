@@ -11,20 +11,21 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
-import { open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
+import { open, readFile, readdir, rename, rm, stat, type FileHandle } from 'node:fs/promises';
 import nodePath from 'node:path';
 
 import {
-  BufferSink,
   Decoder,
   Encoder,
   HeaderFlagNoChecksum,
+  HeaderSize,
   formatFilename,
   lockPgno,
   parseFilename,
   type FileInfo,
   type Header,
 } from './ltx/index.ts';
+import { FileSink } from './util/fs.ts';
 import {
   PrevFrameMismatchError,
   WALFrameHeaderSize,
@@ -177,6 +178,7 @@ export class LocalDatabase {
     const txID = pos + 1n;
 
     this.beginRead();
+    let dbHandle: FileHandle | null = null;
     try {
       const commit = this.pageCount();
       if (commit === 0) return null;
@@ -184,7 +186,7 @@ export class LocalDatabase {
       const pageSize = this.pageSize;
       const lockPg = lockPgno(pageSize);
 
-      const dbBuf = new Uint8Array(await readFile(this.path));
+      dbHandle = await open(this.path, 'r');
       const walBuf = await this.readWalOrEmpty();
 
       // Determine the previous sync state to resume incremental reading.
@@ -241,9 +243,16 @@ export class LocalDatabase {
 
       const finalCommit = Math.max(commit, walCommit);
 
-      // Encode the LTX file.
-      const sink = new BufferSink();
+      // Stream the LTX output directly to a temp file (no whole-file buffer).
+      const dir = this.ltxLevelDir(0);
+      await mkdirAll(dir);
+      const filename = this.ltxPath(0, txID, txID);
+      const tmp = `${filename}.tmp`;
+
+      const fh = await open(tmp, 'w');
+      const sink = new FileSink(fh);
       const enc = new Encoder(sink);
+      try {
       enc.encodeHeader({
         version: 3,
         flags: HeaderFlagNoChecksum,
@@ -261,44 +270,47 @@ export class LocalDatabase {
       });
 
       if (snapshotting) {
-        this.writePagesFromDB(enc, pageSize, finalCommit, lockPg, pageMap, walBuf, dbBuf);
+        await this.writePagesFromDB(enc, pageSize, finalCommit, lockPg, pageMap, walBuf, dbHandle);
       } else {
-        this.writePagesFromWAL(enc, pageSize, finalCommit, prevCommit, lockPg, pageMap, walBuf, dbBuf);
+        await this.writePagesFromWAL(enc, pageSize, finalCommit, prevCommit, lockPg, pageMap, walBuf, dbHandle);
       }
       enc.close();
+      await sink.flush();
+      await fh.close();
 
-      const buf = sink.toBuffer();
-      const dir = this.ltxLevelDir(0);
-      await mkdirAll(dir);
-      const filename = this.ltxPath(0, txID, txID);
-      const tmp = `${filename}.tmp`;
-      await writeFile(tmp, buf);
       await rename(tmp, filename);
 
-      return { level: 0, minTXID: txID, maxTXID: txID, size: buf.length, createdAt: Date.now() };
+      const size = (await stat(filename)).size;
+      return { level: 0, minTXID: txID, maxTXID: txID, size, createdAt: Date.now() };
+      } catch (err) {
+        await fh.close().catch(() => {});
+        await rm(tmp, { force: true }).catch(() => {});
+        throw err;
+      }
     } finally {
+      if (dbHandle !== null) await dbHandle.close();
       this.commitRead();
     }
   }
 
   /** Writes a full snapshot: every committed page, preferring WAL pages. */
-  private writePagesFromDB(
+  private async writePagesFromDB(
     enc: Encoder,
     pageSize: number,
     commit: number,
     lockPg: number,
     pageMap: Map<number, number>,
     walBuf: Uint8Array,
-    dbBuf: Uint8Array,
-  ): void {
+    dbHandle: FileHandle,
+  ): Promise<void> {
     for (let pgno = 1; pgno <= commit; pgno++) {
       if (pgno === lockPg) continue;
-      enc.encodePage({ pgno, flags: 0 }, this.readPage(pgno, pageSize, pageMap, walBuf, dbBuf));
+      enc.encodePage({ pgno, flags: 0 }, await this.readPage(pgno, pageSize, pageMap, walBuf, dbHandle));
     }
   }
 
   /** Writes an incremental file: changed WAL pages + DB growth pages. */
-  private writePagesFromWAL(
+  private async writePagesFromWAL(
     enc: Encoder,
     pageSize: number,
     commit: number,
@@ -306,8 +318,8 @@ export class LocalDatabase {
     lockPg: number,
     pageMap: Map<number, number>,
     walBuf: Uint8Array,
-    dbBuf: Uint8Array,
-  ): void {
+    dbHandle: FileHandle,
+  ): Promise<void> {
     // Sorted page numbers present in the WAL change-set.
     const pgnos = [...pageMap.keys()].sort((a, b) => a - b);
     const lockPgno = lockPg;
@@ -325,11 +337,12 @@ export class LocalDatabase {
       if (pgno === lockPgno) continue;
       // Growth pages (not in pageMap) come directly from the database file.
       if (!pageMap.has(pgno)) {
-        const start = (pgno - 1) * pageSize;
-        enc.encodePage({ pgno, flags: 0 }, new Uint8Array(dbBuf.subarray(start, start + pageSize)));
+        const page = new Uint8Array(pageSize);
+        await readExact(dbHandle, page, (pgno - 1) * pageSize);
+        enc.encodePage({ pgno, flags: 0 }, page);
         continue;
       }
-      enc.encodePage({ pgno, flags: 0 }, this.readPage(pgno, pageSize, pageMap, walBuf, dbBuf));
+      enc.encodePage({ pgno, flags: 0 }, await this.readPage(pgno, pageSize, pageMap, walBuf, dbHandle));
     }
   }
 
@@ -343,13 +356,14 @@ export class LocalDatabase {
     const maxTXID = pos === 0n ? 1n : pos;
 
     this.beginRead();
+    let dbHandle: FileHandle | null = null;
     try {
       const commit = this.pageCount();
       if (commit === 0) return null;
 
       const pageSize = this.pageSize;
       const lockPg = lockPgno(pageSize);
-      const dbBuf = new Uint8Array(await readFile(this.path));
+      dbHandle = await open(this.path, 'r');
       const walBuf = await this.readWalOrEmpty();
 
       // Build the committed WAL page map for the overlay (may be empty).
@@ -375,55 +389,67 @@ export class LocalDatabase {
       const finalCommit = Math.max(commit, walCommit);
       if (finalCommit === 0) return null;
 
-      const sink = new BufferSink();
-      const enc = new Encoder(sink);
-      enc.encodeHeader({
-        version: 3,
-        flags: HeaderFlagNoChecksum,
-        pageSize,
-        commit: finalCommit,
-        minTXID: 1n,
-        maxTXID,
-        timestamp: BigInt(Date.now()),
-        preApplyChecksum: 0n,
-        walOffset: BigInt(WALHeaderSize),
-        walSize: BigInt(Math.max(0, walBuf.length - WALHeaderSize)),
-        walSalt1: salt1,
-        walSalt2: salt2,
-        nodeID: 0n,
-      });
-      this.writePagesFromDB(enc, pageSize, finalCommit, lockPg, pageMap, walBuf, dbBuf);
-      enc.close();
-
-      const buf = sink.toBuffer();
+      // Stream the LTX output directly to a temp file (no whole-file buffer).
       const dir = this.ltxLevelDir(9);
       await mkdirAll(dir);
       const filename = this.ltxPath(9, 1n, maxTXID);
       const tmp = `${filename}.tmp`;
-      await writeFile(tmp, buf);
+
+      const fh = await open(tmp, 'w');
+      const sink = new FileSink(fh);
+      const enc = new Encoder(sink);
+      try {
+        enc.encodeHeader({
+          version: 3,
+          flags: HeaderFlagNoChecksum,
+          pageSize,
+          commit: finalCommit,
+          minTXID: 1n,
+          maxTXID,
+          timestamp: BigInt(Date.now()),
+          preApplyChecksum: 0n,
+          walOffset: BigInt(WALHeaderSize),
+          walSize: BigInt(Math.max(0, walBuf.length - WALHeaderSize)),
+          walSalt1: salt1,
+          walSalt2: salt2,
+          nodeID: 0n,
+        });
+        await this.writePagesFromDB(enc, pageSize, finalCommit, lockPg, pageMap, walBuf, dbHandle);
+        enc.close();
+        await sink.flush();
+        await fh.close();
+      } catch (err) {
+        await fh.close().catch(() => {});
+        await rm(tmp, { force: true }).catch(() => {});
+        throw err;
+      }
+
       await rename(tmp, filename);
 
-      return { level: 9, minTXID: 1n, maxTXID, size: buf.length, createdAt: Date.now() };
+      const size = (await stat(filename)).size;
+      return { level: 9, minTXID: 1n, maxTXID, size, createdAt: Date.now() };
     } finally {
+      if (dbHandle !== null) await dbHandle.close();
       this.commitRead();
     }
   }
 
   /** Reads a single page, preferring the WAL over the database file. */
-  private readPage(
+  private async readPage(
     pgno: number,
     pageSize: number,
     pageMap: Map<number, number>,
     walBuf: Uint8Array,
-    dbBuf: Uint8Array,
-  ): Uint8Array {
+    dbHandle: FileHandle,
+  ): Promise<Uint8Array> {
     const off = pageMap.get(pgno);
     if (off !== undefined) {
       const start = off + WALFrameHeaderSize;
       return new Uint8Array(walBuf.subarray(start, start + pageSize));
     }
-    const start = (pgno - 1) * pageSize;
-    return new Uint8Array(dbBuf.subarray(start, start + pageSize));
+    const page = new Uint8Array(pageSize);
+    await readExact(dbHandle, page, (pgno - 1) * pageSize);
+    return page;
   }
 
   /** Reads the WAL file bytes, returning empty if it does not exist. */
@@ -448,17 +474,24 @@ export class LocalDatabase {
     let max = files[0];
     for (const f of files) if (f.maxTXID > max.maxTXID) max = f;
     try {
-      const buf = new Uint8Array(await readFile(this.ltxPath(0, max.minTXID, max.maxTXID)));
-      const hdr = new Decoder(buf);
-      hdr.decodeHeader();
-      const h: Header = hdr.Header();
-      return {
-        walOffset: Number(h.walOffset),
-        walSize: Number(h.walSize),
-        salt1: h.walSalt1,
-        salt2: h.walSalt2,
-        commit: h.commit,
-      };
+      // Only the 100-byte header is needed; do not read the whole file.
+      const fh = await open(this.ltxPath(0, max.minTXID, max.maxTXID), 'r');
+      try {
+        const buf = new Uint8Array(HeaderSize);
+        await readExact(fh, buf, 0);
+        const hdr = new Decoder(buf);
+        hdr.decodeHeader();
+        const h: Header = hdr.Header();
+        return {
+          walOffset: Number(h.walOffset),
+          walSize: Number(h.walSize),
+          salt1: h.walSalt1,
+          salt2: h.walSalt2,
+          commit: h.commit,
+        };
+      } finally {
+        await fh.close();
+      }
     } catch {
       return null;
     }
@@ -489,5 +522,19 @@ function makeResumeReader(walBuf: Uint8Array, offset: number, salt1: number, sal
   } catch (err) {
     if (err instanceof PrevFrameMismatchError) return null;
     throw err;
+  }
+}
+
+/** Reads exactly `buf.length` bytes into `buf` from `handle` at `position`. */
+async function readExact(
+  handle: FileHandle,
+  buf: Uint8Array,
+  position: number,
+): Promise<void> {
+  let offset = 0;
+  while (offset < buf.length) {
+    const { bytesRead } = await handle.read(buf, offset, buf.length - offset, position + offset);
+    if (bytesRead === 0) throw new Error('unexpected end of file while reading a page');
+    offset += bytesRead;
   }
 }
