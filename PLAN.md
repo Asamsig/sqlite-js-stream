@@ -465,15 +465,25 @@ This is the core. Implement:
 
 ### Milestone 5 — Store + config + monitoring + compaction (post-MVP, still core) ✅ DONE (core)
 
-- **`src/store.ts`** — open many DBs concurrently (bounded, e.g. 50), start per-DB monitor loops,
-  schedule snapshot interval, run retention.
-- **`src/ltx/compactor.ts`** — merge LTX readers (page dedup, lock-page skip, latest page wins)
-  producing a higher-level LTX; used by compaction *and* restore.
-- **`src/replica.ts`** — compaction scheduling (L0→L1 hourly, L1→L2 daily), retention of old L0.
+- **`src/store.ts`** — open many DBs concurrently, start per-DB monitor loops, schedule snapshot
+  interval, run retention (`syncAll`, `snapshotAll`, `compactAll`, `enforceRetentionAll`, `run`).
+- **`src/ltx/compactor.ts`** — in-memory merge of LTX readers (page dedup, lock-page skip, latest
+  page wins) used by restore; the streaming `StreamingCompactor` (page-by-page, bounded memory) is
+  used by multi-level compaction.
+- **`src/replica.ts`** — **compaction scheduling** (`compact()`/`compactLevel()` merging a level's
+  pending files into the next, up to `maxCompactionLevel`), **retention/GC**
+  (`enforceRetention()`) that prunes old snapshots and superseded files, and interval-driven
+  `compactionIntervalMs`/`retentionIntervalMs` inside `run()`.
 - **`src/config.ts`** — parse replica URLs (`file://`, later `s3://`), DB config.
 
-**Acceptance:** multi-DB store; snapshot rotation; compaction merges L0 into L1 and verifies
-contiguous TXIDs; retention prunes old L0; restore still correct after compaction.
+**Acceptance:** multi-DB store; snapshot rotation; compaction merges L0→L1→…→max and verifies
+contiguous TXIDs; retention prunes old L0/snapshots; restore still correct after compaction; position
+and WAL-resumption survive compaction + GC (incremental sync continues without reusing TXIDs).
+
+✅ **Implemented (post-MVP hardening):** multi-level streaming compaction (L0→L1→L2→L3 via
+`StreamingCompactor`), snapshot + coverage-based retention/GC, and interval scheduling in
+`Replica.run()`/`Store.run()`. Restore now builds its plan across all compaction levels, preferring
+the highest level for a TXID range.
 
 ### Milestone 6+ — Advanced / optional (NOT required for MVP)
 

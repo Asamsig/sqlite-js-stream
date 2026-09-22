@@ -18,6 +18,7 @@ export * from './encoder.ts';
 export * from './decoder.ts';
 export * from './stream.ts';
 export * from './compactor.ts';
+export * from './streaming-compactor.ts';
 export * from './file-info.ts';
 
 // LZ4 block codec is internal (not part of the public LTX surface) but

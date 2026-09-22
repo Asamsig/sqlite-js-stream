@@ -32,13 +32,13 @@ prevents the WAL from being checkpointed past our position.
 
 | Component | Responsibility |
 |-----------|----------------|
-| **LTX module** (`src/ltx/`) | Encode/decode LTX files; CRC-64 ISO checksums; LZ4 *block* codec; page index; compactor. |
+| **LTX module** (`src/ltx/`) | Encode/decode LTX files; CRC-64 ISO checksums; LZ4 *block* codec; page index; in-memory `Compactor` and streaming `StreamingCompactor`. |
 | **WAL module** (`src/wal/`) | Parse SQLite WAL header/frames; verify salt + checksum; produce `pageMap()` (latest committed page offsets). |
 | **LocalDatabase** (`src/db.ts`, internal) | Reads a database + `-wal` directly from disk, builds LTX files (base snapshot, incremental L0, level-9 snapshot), and tracks the local position. It holds a short-lived **read-only** `node:sqlite` read transaction to **pin the WAL snapshot** (SQLite won't checkpoint/truncate past an active reader), then reads the files via `fs`. It is an internal implementation detail, not part of the public API. |
-| **Replica** (`src/replica.ts`) | Upload level-0/level-9 LTX files to a client; track the replicated position; `restore()`, `ensureExists()`, `syncStatus()`. |
+| **Replica** (`src/replica.ts`) | Upload level-0/level-9 LTX files to a client; track the replicated position; `restore()`, `ensureExists()`, `syncStatus()`, `compact()`, `enforceRetention()`, `run()`. |
 | **ReplicaClient** (`src/replica-client.ts`) | An interface to a storage backend (`LTXFiles`, `OpenLTXFile`, `WriteLTXFile`, `DeleteLTXFiles`, `DeleteAll`). Addons implement this to add upload strategies. |
 | **File backend** (`src/backends/file/`) | The simplest backend: store LTX files in `<root>/ltx/<level>/<min>-<max>.ltx`, atomic writes. |
-| **Store** (`src/store.ts`) | Coordinate multiple `Replica`s. |
+| **Store** (`src/store.ts`) | Coordinate multiple `Replica`s: `syncAll()`, `snapshotAll()`, `compactAll()`, `enforceRetentionAll()`, `run()`. |
 | **Addons** (`packages/`) | Upload strategies live as separate workspace packages. Each addon depends on the core `sqlite-js-stream` and registers a URL scheme (e.g. `packages/backend-s3` registers `s3://`). |
 
 > The repository is a **pnpm workspace**: the core package is at the root and
@@ -82,16 +82,61 @@ sync error is logged and the loop keeps going.
 ### Replica.restore()
 
 1. `CalcRestorePlan` picks the latest **level-9 snapshot** at or before the target TXID, then the
-   contiguous **level-0** files after it.
+   contiguous files across all **compaction levels** (0..max) after it, preferring the highest level
+   for any given TXID range.
 2. Each file is opened via `ReplicaClient.openLtxFile` and decoded with a **streaming** LTX reader
    (`StreamLtxReader`), so the whole file is never held in memory.
 3. The snapshot's pages are streamed into the output file in order (the lock page is written as
-   zeros). Each later level-0 file's pages are then **overlaid** at their page offsets, so a later
-   version of a page wins.
+   zeros). Each later file's pages are then **overlaid** at their page offsets, so a later version of
+   a page wins.
 4. The output file is truncated to the last file's committed page count and atomically renamed.
 
 Because restore never materializes the full merged LTX (or the whole DB) in memory, peak memory is
 bounded by one page buffer plus the (small) page index, regardless of the database size.
+
+---
+
+## Compaction & retention
+
+Replication writes fresh **level-0** files per sync. To keep the replica from growing without bound
+and the restore plan from spanning thousands of tiny files, `Replica.compact()` merges a level's
+files into the next level using the streaming compactor (`StreamingCompactor`), and
+`Replica.enforceRetention()` prunes superseded files.
+
+### Levels
+
+- **Level 0**: fresh incremental files written by each `sync()`.
+- **Levels 1..N** (`maxCompactionLevel`, default 3): compacted files. `compact(dstLevel)` reads the
+  pending files at `dstLevel - 1` (after the current max TXID at `dstLevel`) and writes a single
+  merged file at `dstLevel` covering the whole TXID range. Later files win for equal page numbers.
+- **Level 9**: full-database snapshots written by `snapshot()`.
+
+Compaction is **streaming**: each source is read page-by-page and the merged output is written
+straight to a file, so peak memory stays bounded. The output carries the WAL position of the newest
+input, so sync can continue incrementally even after level-0 files are pruned.
+
+### Retention / GC
+
+`Replica.enforceRetention({ snapshotRetain, snapshotRetentionMs, l0RetentionMs })`:
+
+1. **Snapshots** past the policy are deleted (keep newest `snapshotRetain`, and/or delete those older
+   than `snapshotRetentionMs`; the newest snapshot is always kept).
+2. Files whose `MaxTXID` is below the **oldest retained snapshot** are deleted — a snapshot at TXID N
+   supersedes every file below N, so those are no longer needed to restore any target within the
+   retention window.
+3. Files at a lower level that are fully covered by a file at a higher level and are older than
+   `l0RetentionMs` are deleted (for example, a compacted level-1 file supersedes its level-0
+   sources).
+
+Deletion happens on both the client and the local cache, so the two stay consistent. Because
+compaction only deletes a source file after its destination file is written *and uploaded*, a
+failure mid-compaction never loses data.
+
+### Scheduling
+
+`Replica.run()` can run `sync()`, `compact()`, and `enforceRetention()` on independent intervals via
+`compactionIntervalMs` / `retentionIntervalMs`; `Store.run()` drives the same loop across all
+replicas. `Store.compactAll()` / `enforceRetentionAll()` run a single pass over every database.
 
 ---
 
@@ -133,5 +178,5 @@ left off, even after a restart.
 - LZ4 uses `lz4js` (pure JS **block** format), which is interoperable for **decompression** but not
   byte-identical to Go's `pierrec/lz4/v4`. Files written here are readable by Litestream and
   vice-versa.
-- Multi-level compaction (L0→L1→L2 + retention), cloud backends, distributed leasing, VFS
-  mirroring, and the IPC server are not yet implemented.
+- Cloud backends beyond S3, distributed leasing (`lock.json` conditional writes for multi-replica
+  safety), VFS mirroring, and the IPC server are not yet implemented.

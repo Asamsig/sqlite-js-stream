@@ -6,7 +6,7 @@
  * scheduling, and retention are future work.
  */
 
-import type { Replica } from './replica.ts';
+import type { Replica, RetentionOptions, ReplicaRunOptions } from './replica.ts';
 import { Replica as ReplicaClass } from './replica.ts';
 import type { ReplicaClient } from './replica-client.ts';
 
@@ -38,6 +38,29 @@ export class Store {
     for (const replica of this.items) {
       await replica.snapshot();
     }
+  }
+
+  /** CompactAll compacts pending LTX files for every database. */
+  async compactAll(): Promise<void> {
+    for (const replica of this.items) {
+      await replica.compact();
+    }
+  }
+
+  /** EnforceRetentionAll prunes old snapshots/files for every database. */
+  async enforceRetentionAll(options: RetentionOptions = {}): Promise<void> {
+    for (const replica of this.items) {
+      await replica.enforceRetention(options);
+    }
+  }
+
+  /**
+   * Run starts each replica's continuous sync/compaction/retention loop and
+   * resolves once `options.signal` is aborted. Pass per-replica intervals and a
+   * retention policy via {@link ReplicaRunOptions}.
+   */
+  async run(options: ReplicaRunOptions = {}): Promise<void> {
+    await Promise.all(this.items.map((replica) => replica.run(options)));
   }
 
   /** Close releases all replicas' internal connections. */

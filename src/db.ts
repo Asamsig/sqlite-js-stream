@@ -33,6 +33,7 @@ import {
   WALReader,
   WALEOFError,
 } from './wal/index.ts';
+import { SnapshotLevel } from './replica-client.ts';
 import { mkdirAll } from './util/fs.ts';
 
 /** Reads the page size from the SQLite database header (bytes 16-17). */
@@ -103,7 +104,12 @@ export class LocalDatabase {
 
   /** Lists local level-0 LTX files, sorted by TXID. */
   async l0Files(): Promise<FileInfo[]> {
-    const dir = this.ltxLevelDir(0);
+    return this.filesForLevel(0);
+  }
+
+  /** Lists local LTX files for any level, sorted by TXID. */
+  async filesForLevel(level: number): Promise<FileInfo[]> {
+    const dir = this.ltxLevelDir(level);
     const out: FileInfo[] = [];
     let entries;
     try {
@@ -122,7 +128,7 @@ export class LocalDatabase {
         continue;
       }
       const st = await stat(nodePath.join(dir, entry.name));
-      out.push({ level: 0, minTXID, maxTXID, size: st.size, createdAt: st.mtimeMs });
+      out.push({ level, minTXID, maxTXID, size: st.size, createdAt: st.mtimeMs });
     }
     out.sort((a, b) => (a.minTXID < b.minTXID ? -1 : a.minTXID > b.minTXID ? 1 : 0));
     return out;
@@ -130,11 +136,19 @@ export class LocalDatabase {
 
   /** Pos returns the maximum TXID in the local level-0 cache (0 if none). */
   async pos(): Promise<bigint> {
-    const files = await this.l0Files();
-    if (files.length === 0) return 0n;
-    let max = files[0].maxTXID;
-    for (const f of files) if (f.maxTXID > max) max = f.maxTXID;
-    return max;
+    const m = await this.maxFile();
+    return m === null ? 0n : m.maxTXID;
+  }
+
+  /** Returns the local LTX file with the highest maxTXID across all levels. */
+  private async maxFile(): Promise<FileInfo | null> {
+    let best: FileInfo | null = null;
+    for (let level = 0; level <= SnapshotLevel; level++) {
+      for (const f of await this.filesForLevel(level)) {
+        if (best === null || f.maxTXID > best.maxTXID) best = f;
+      }
+    }
+    return best;
   }
 
   /**
@@ -469,13 +483,11 @@ export class LocalDatabase {
     salt2: number;
     commit: number;
   } | null> {
-    const files = await this.l0Files();
-    if (files.length === 0) return null;
-    let max = files[0];
-    for (const f of files) if (f.maxTXID > max.maxTXID) max = f;
+    const max = await this.maxFile();
+    if (max === null) return null;
     try {
       // Only the 100-byte header is needed; do not read the whole file.
-      const fh = await open(this.ltxPath(0, max.minTXID, max.maxTXID), 'r');
+      const fh = await open(this.ltxPath(max.level, max.minTXID, max.maxTXID), 'r');
       try {
         const buf = new Uint8Array(HeaderSize);
         await readExact(fh, buf, 0);

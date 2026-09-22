@@ -307,6 +307,42 @@ The replication path is **streaming** end-to-end, so peak memory is bounded by o
 - The S3 addon uploads objects larger than **5 MiB** with the **multipart** API, so a large snapshot
   is never buffered on the upload side either.
 
+### Compaction & retention
+
+Over time `sync()` writes one level-0 LTX file per transaction. To keep the replica bounded and
+restore fast, compact those into higher levels and prune data that has been superseded:
+
+```ts
+// Merge pending level-0 files into a level-1 file (and 1→2→3 up to maxCompactionLevel).
+await replica.compact();
+
+// Delete old snapshots and files that a retained snapshot supersedes.
+const result = await replica.enforceRetention({
+  snapshotRetain: 2,       // keep the 2 newest level-9 snapshots
+  snapshotRetentionMs: 0,  // (or delete snapshots older than N ms)
+  l0RetentionMs: 0,        // delete compacted sources immediately
+});
+```
+
+`Replica.run()` can drive all of this on separate intervals, and `Store` orchestrates it across every
+replica:
+
+```ts
+await store.run({
+  intervalMs: 1000,
+  compactionIntervalMs: 30_000,
+  retentionIntervalMs: 60_000,
+  retention: { snapshotRetain: 2, l0RetentionMs: 0 },
+  signal,
+});
+```
+
+Compaction is **streaming** (bounded memory) and only deletes a lower-level file after the higher
+level is written *and* uploaded, so a mid-compaction failure never loses data. Retention never deletes
+files needed to restore any point within the retention window.
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#compaction--retention) for the full model.
+
 ---
 
 ## Documentation

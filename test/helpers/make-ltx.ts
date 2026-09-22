@@ -6,6 +6,7 @@ import {
   BufferSink,
   checksumReader,
   Encoder,
+  HeaderFlagNoChecksum,
   type Header,
   type PageHeader,
   type Trailer,
@@ -71,5 +72,40 @@ export function makeSnapshot(commit: number, pageSize = 512): FileSpec {
     },
     pages,
     trailer: { postApplyChecksum, fileChecksum: 0n },
+  };
+}
+
+/**
+ * Builds an incremental (non-snapshot) LTX FileSpec whose pages are exactly
+ * `pages` (pgno and data), with `HeaderFlagNoChecksum` so a snapshot-style
+ * post-apply checksum is not required/verified.
+ */
+export function makeIncrementalSpec(opts: {
+  minTXID: bigint;
+  maxTXID: bigint;
+  commit: number;
+  pages: PageSpec[];
+  pageSize?: number;
+  timestamp?: number;
+}): FileSpec {
+  const pageSize = opts.pageSize ?? 512;
+  return {
+    header: {
+      version: 3,
+      flags: HeaderFlagNoChecksum,
+      pageSize,
+      commit: opts.commit,
+      minTXID: opts.minTXID,
+      maxTXID: opts.maxTXID,
+      timestamp: BigInt(opts.timestamp ?? 1000),
+      preApplyChecksum: 0n,
+      walOffset: 0n,
+      walSize: 0n,
+      walSalt1: 0,
+      walSalt2: 0,
+      nodeID: 0n,
+    },
+    pages: opts.pages,
+    trailer: { postApplyChecksum: 0n, fileChecksum: 0n },
   };
 }

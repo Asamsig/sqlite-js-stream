@@ -81,3 +81,33 @@ test('Store opens, syncs, and closes multiple databases', async () => {
     store.close();
   }
 });
+
+test('Store compacts and enforces retention across databases', async () => {
+  const t = createWALDB(['a', 'b', 'c']);
+  const client = new FileReplicaClient(makeTempDir('repl-'));
+  const store = new Store();
+  try {
+    const replica = await store.openDB(t.path, client);
+    await store.syncAll();
+    t.db.exec("INSERT INTO t (name) VALUES ('d')");
+    await store.syncAll();
+
+    // Compact pending L0 files into a higher level, then GC the sources.
+    await store.compactAll();
+    await store.enforceRetentionAll({ l0RetentionMs: 0 });
+
+    let l0 = 0;
+    for await (const _ of client.ltxFiles({ level: 0, seek: 0n, useMetadata: false })) l0++;
+    assert.equal(l0, 0, 'level-0 files are pruned after compaction + GC');
+
+    const out = join(makeTempDir('restore-'), 'store.db');
+    await replica.restore({ outputPath: out });
+    const restored = new DatabaseSync(out);
+    const c = restored.prepare('SELECT count(*) AS n FROM t').get() as { n: number };
+    assert.equal(c.n, 4);
+    restored.close();
+  } finally {
+    t.close();
+    store.close();
+  }
+});
