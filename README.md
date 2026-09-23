@@ -307,6 +307,23 @@ The replication path is **streaming** end-to-end, so peak memory is bounded by o
 - The S3 addon uploads objects larger than **5 MiB** with the **multipart** API, so a large snapshot
   is never buffered on the upload side either.
 
+### Benchmarks
+
+Reproducible, configurable benchmarks live in [`bench/bench-sync-restore.ts`](bench/bench-sync-restore.ts)
+and measure `sync()`/`restore()` throughput plus peak process RSS:
+
+```bash
+pnpm bench
+# another size / batch:
+ROWS=200000 BATCH=1000 pnpm bench
+# demonstrate the streaming memory bound (peak RSS vs DB size):
+SCALE=4 pnpm bench
+```
+
+Conditions are disclosed in the output (rows, batch/transactions, source WAL bytes). Peak RSS is
+process-wide (it includes the Node baseline), so the meaningful claim is that it stays **flat** as the
+database grows — see the `SCALE` mode, which shows WAL bytes and peak RSS at two sizes.
+
 ### Compaction & retention
 
 Over time `sync()` writes one level-0 LTX file per transaction. To keep the replica bounded and

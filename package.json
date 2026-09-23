@@ -24,7 +24,8 @@
     "test": "node --test 'test/**/*.test.ts'",
     "typecheck": "tsc -p . --noEmit",
     "test:all": "pnpm test && pnpm -r test",
-    "typecheck:all": "pnpm typecheck"
+    "typecheck:all": "pnpm typecheck",
+    "bench": "node bench/bench-sync-restore.ts"
   },
   "dependencies": {
     "lz4js": "^0.2.0"
