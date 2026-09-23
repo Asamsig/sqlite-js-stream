@@ -25,7 +25,13 @@ import {
   lockPgno,
   StreamLtxReader,
   StreamingCompactor,
+  CompactionLevels,
+  nextCompactionAt,
+  prevCompactionAt,
+  defaultCompactionLevels,
+  DefaultL0RetentionCheckIntervalMs,
   type FileInfo,
+  type CompactionLevel,
 } from './ltx/index.ts';
 import { LocalDatabase } from './db.ts';
 import type { ReplicaClient } from './replica-client.ts';
@@ -46,7 +52,10 @@ export interface SyncStatus {
   inSync: boolean;
 }
 
-/** Default highest LTX compaction level (L0 -> L1 -> ... -> L{max}). */
+/**
+ * Default highest LTX compaction level (L0 -> L1 -> ... -> L{max}) for the
+ * legacy {@link CompactOptions.maxLevel} path. Prefer {@link CompactionLevels}.
+ */
 export const DefaultMaxCompactionLevel = 3;
 
 export interface CompactOptions {
@@ -59,13 +68,19 @@ export interface CompactOptions {
 
 /** Retention/GC policy for pruning old snapshots and compacted files. */
 export interface RetentionOptions {
-  /** Keep this many newest level-9 snapshots. Defaults to 2. */
-  snapshotRetain?: number;
-  /** Delete level-9 snapshots older than this many milliseconds. */
+  /**
+   * Delete level-9 snapshots older than this many milliseconds. The newest
+   * snapshot is always kept. Defaults to 0 (keep all snapshots).
+   */
   snapshotRetentionMs?: number;
   /**
-   * Minimum age (ms) before a file that has been compacted into a higher level
-   * is deleted. Defaults to 0 (delete as soon as it is covered).
+   * Keep at least this many newest level-9 snapshots even if they are older
+   * than {@link snapshotRetentionMs}. Defaults to 1 (always keep the newest).
+   */
+  snapshotRetain?: number;
+  /**
+   * Minimum age (ms) before a level-0 file that has been compacted into level-1
+   * is deleted. Defaults to 0 (no L0 time-based GC).
    */
   l0RetentionMs?: number;
 }
@@ -73,23 +88,72 @@ export interface RetentionOptions {
 export interface RetentionResult {
   snapshotsDeleted: number;
   filesDeleted: number;
-  /** maxTXID of the oldest retained snapshot; files below it are removed. */
+  /** MaxTXID of the last snapshot that was deleted; files below it are removed. */
   boundary: bigint;
 }
+
+/** Returned by compaction scheduling when there is nothing to compact. */
+export const ErrNoCompaction = new Error('no files to compact');
+/** Returned when a level was already compacted within its current time bucket. */
+export const ErrCompactionTooEarly = new Error('compaction scheduled too early');
 
 export interface ReplicaRunOptions {
   /** Milliseconds between syncs. Defaults to 1000. */
   intervalMs?: number;
   /** Abort to stop continuous syncing. */
   signal?: AbortSignal;
-  /** Run compaction every N ms while running (0 disables). Defaults to 0. */
-  compactionIntervalMs?: number;
-  /** Run retention GC every N ms while running (0 disables). Defaults to 0. */
-  retentionIntervalMs?: number;
-  /** Retention policy used by the retention loop. */
-  retention?: RetentionOptions;
-  /** Max compaction level. Defaults to {@link DefaultMaxCompactionLevel}. */
+  /**
+   * Per-level compaction schedule. Defaults to {@link defaultCompactionLevels}.
+   * Levels are compacted at most once per wall-clock bucket.
+   */
+  compactionLevels?: CompactionLevels;
+  /**
+   * Legacy: max compaction level when {@link compactionLevels} is not given.
+   * Defaults to {@link DefaultMaxCompactionLevel}.
+   */
   maxLevel?: number;
+  /**
+   * Legacy: cascade-compact all levels every N ms (disables per-level buckets
+   * when set). Defaults to 0 (disabled).
+   */
+  compactionIntervalMs?: number;
+  /** Legacy: run {@link Replica.enforceRetention} every N ms. Defaults to 0. */
+  retentionIntervalMs?: number;
+  /** Retention policy used by the legacy retention loop. */
+  retention?: RetentionOptions;
+  /**
+   * Milliseconds between level-9 snapshots while running (0 disables).
+   * Defaults to 0.
+   */
+  snapshotIntervalMs?: number;
+  /** Time-based snapshot retention (ms) applied after each snapshot. */
+  snapshotRetentionMs?: number;
+  /** Keep at least this many newest snapshots (default 1). */
+  snapshotRetain?: number;
+  /**
+   * Min age (ms) before a compacted level-0 file is deleted. When > 0 an L0
+   * retention pass runs on {@link l0RetentionCheckIntervalMs}. Defaults to 0.
+   */
+  l0RetentionMs?: number;
+  /** How often (ms) to run the L0 time-retention pass. Defaults to 15s. */
+  l0RetentionCheckIntervalMs?: number;
+}
+
+/** Constant intervals for compaction levels beyond the 4-level default. */
+const HIGHER_LEVEL_INTERVAL_MS = 3_600_000;
+
+/** Default intervals for levels 1..3 (matches litestream's defaults). */
+const DEFAULT_LEVEL_INTERVALS = [30_000, 300_000, 3_600_000];
+
+/** Builds a CompactionLevels covering levels 0..max with sane intervals. */
+function compactionLevelsForMax(max: number): CompactionLevels {
+  const arr: CompactionLevel[] = [];
+  for (let i = 0; i <= max; i++) {
+    const intervalMs =
+      i === 0 ? 0 : (DEFAULT_LEVEL_INTERVALS[i - 1] ?? HIGHER_LEVEL_INTERVAL_MS);
+    arr.push({ level: i, intervalMs });
+  }
+  return new CompactionLevels(arr);
 }
 
 /** Replica replicates a single database (by path) to a ReplicaClient. */
@@ -99,22 +163,40 @@ export class Replica {
   private logger: Logger;
   private posValue: bigint | null = null;
   private db: LocalDatabase | null = null;
-
-  /** Highest LTX compaction level this replica will produce. */
-  maxCompactionLevel = DefaultMaxCompactionLevel;
+  private compactionLevelsValue: CompactionLevels = defaultCompactionLevels();
 
   constructor(
     path: string,
     client: ReplicaClient,
     logger: Logger = noopLogger,
-    options: { maxLevel?: number } = {},
+    options: { maxLevel?: number; compactionLevels?: CompactionLevels } = {},
   ) {
     this.path = path;
     this.client = client;
     this.logger = logger;
-    if (options.maxLevel !== undefined) {
+    if (options.compactionLevels) {
+      this.compactionLevelsValue = options.compactionLevels;
+    } else if (options.maxLevel !== undefined) {
       this.maxCompactionLevel = options.maxLevel;
     }
+  }
+
+  /** Per-level compaction schedule. Defaults to {@link defaultCompactionLevels}. */
+  get compactionLevels(): CompactionLevels {
+    return this.compactionLevelsValue;
+  }
+
+  set compactionLevels(levels: CompactionLevels) {
+    this.compactionLevelsValue = levels;
+  }
+
+  /** Highest non-snapshot compaction level this replica will produce. */
+  get maxCompactionLevel(): number {
+    return this.compactionLevelsValue.maxLevel();
+  }
+
+  set maxCompactionLevel(level: number) {
+    this.compactionLevelsValue = compactionLevelsForMax(level);
   }
 
   /** Lazily opens the local database reader (cached). */
@@ -178,19 +260,43 @@ export class Replica {
   }
 
   /**
-   * Run continuously syncs the replica until `signal` is aborted. It syncs
-   * immediately, then waits `intervalMs` and repeats. Errors during a sync are
-   * logged and the loop keeps going, so a transient failure does not stop
-   * replication. Resolves once the signal is aborted.
+   * Run continuously drives the replica until `signal` is aborted. It syncs on
+   * `intervalMs`, compacts per level on each level's wall-clock bucket, takes
+   * snapshots on `snapshotIntervalMs`, and enforces retention. Errors are logged
+   * and the loop keeps going, so a transient failure does not stop replication.
+   *
+   * Compaction mirrors litestream: each level is compacted at most once per
+   * bucket (see {@link CompactionLevels}); the legacy `compactionIntervalMs`
+   * cascades all levels on a fixed interval instead.
    */
   async run(opt: ReplicaRunOptions = {}): Promise<void> {
     const { intervalMs = 1000, signal } = opt;
     if (opt.maxLevel !== undefined) this.maxCompactionLevel = opt.maxLevel;
+
+    const levels = opt.compactionLevels ?? this.compactionLevels;
+    const useLegacyCompaction = (opt.compactionIntervalMs ?? 0) > 0;
     const compactionIntervalMs = opt.compactionIntervalMs ?? 0;
     const retentionIntervalMs = opt.retentionIntervalMs ?? 0;
+    const snapshotIntervalMs = opt.snapshotIntervalMs ?? 0;
+    const l0RetentionMs = opt.l0RetentionMs ?? 0;
+    const l0RetentionCheckIntervalMs =
+      opt.l0RetentionCheckIntervalMs ?? DefaultL0RetentionCheckIntervalMs;
 
     let lastCompaction = 0;
     let lastRetention = 0;
+    let snapshotNext =
+      snapshotIntervalMs > 0 ? nextCompactionAt(Date.now(), snapshotIntervalMs) : Infinity;
+    let l0RetentionNext = l0RetentionMs > 0 ? Date.now() + l0RetentionCheckIntervalMs : Infinity;
+
+    // Per-level next-bucket times (litestream-style scheduling).
+    const levelNext = new Map<number, number>();
+    if (!useLegacyCompaction) {
+      for (const lvl of levels.toArray()) {
+        if (lvl.level > 0 && lvl.intervalMs > 0) {
+          levelNext.set(lvl.level, nextCompactionAt(Date.now(), lvl.intervalMs));
+        }
+      }
+    }
 
     while (!signal?.aborted) {
       try {
@@ -201,14 +307,47 @@ export class Replica {
       if (signal?.aborted) break;
 
       const now = Date.now();
-      if (compactionIntervalMs > 0 && now - lastCompaction >= compactionIntervalMs) {
-        try {
-          await this.compact();
-        } catch (err) {
-          this.logger.error('replica compaction error', err);
+
+      // Compaction.
+      if (useLegacyCompaction) {
+        if (compactionIntervalMs > 0 && now - lastCompaction >= compactionIntervalMs) {
+          try {
+            await this.compact();
+          } catch (err) {
+            this.logger.error('replica compaction error', err);
+          }
+          lastCompaction = Date.now();
         }
-        lastCompaction = Date.now();
+      } else {
+        for (const [level, next] of levelNext) {
+          if (now >= next) {
+            try {
+              await this.compactDB(level, now);
+            } catch (err) {
+              if (err !== ErrNoCompaction && err !== ErrCompactionTooEarly) {
+                this.logger.error('replica compaction error', err);
+              }
+            }
+            levelNext.set(level, nextCompactionAt(now, levels.level(level).intervalMs));
+          }
+        }
       }
+
+      // Snapshot + snapshot retention.
+      if (snapshotIntervalMs > 0 && now >= snapshotNext) {
+        try {
+          await this.compactSnapshot(now, snapshotIntervalMs);
+          const retention = opt.snapshotRetentionMs ?? 0;
+          if (retention > 0 || (opt.snapshotRetain ?? 0) > 0) {
+            await this.enforceSnapshotRetention(now, retention, opt.snapshotRetain ?? 0);
+          }
+        } catch (err) {
+          this.logger.error('replica snapshot error', err);
+        }
+        snapshotNext = nextCompactionAt(now, snapshotIntervalMs);
+      }
+
+      // Retention (legacy interval-driven or L0 time-based).
       if (retentionIntervalMs > 0 && now - lastRetention >= retentionIntervalMs) {
         try {
           await this.enforceRetention(opt.retention ?? {});
@@ -216,6 +355,14 @@ export class Replica {
           this.logger.error('replica retention error', err);
         }
         lastRetention = Date.now();
+      }
+      if (l0RetentionMs > 0 && now >= l0RetentionNext) {
+        try {
+          await this.enforceL0RetentionByTime(now, l0RetentionMs);
+        } catch (err) {
+          this.logger.error('replica l0 retention error', err);
+        }
+        l0RetentionNext = now + l0RetentionCheckIntervalMs;
       }
 
       if (signal?.aborted) break;
@@ -228,11 +375,12 @@ export class Replica {
   }
 
   /** Snapshot writes and uploads a level-9 full-database LTX file. */
-  async snapshot(): Promise<void> {
+  async snapshot(): Promise<FileInfo | null> {
     const info = await (await this.localDb()).snapshot();
     if (info) {
       await this.uploadLtxFile(9, info.minTXID, info.maxTXID);
     }
+    return info;
   }
 
   /** SyncStatus reports the local and remote positions. */
@@ -453,52 +601,145 @@ export class Replica {
   }
 
   /**
-   * EnforceRetention prunes old snapshots and compacted files.
+   * CompactDB compacts `dstLevel` if it is time to do so and there is pending
+   * source data. Mirrors litestream's `Store.CompactDB`: it refuses to re-compact
+   * within the level's current time bucket (throws {@link ErrCompactionTooEarly})
+   * and skips when there is nothing to do (throws {@link ErrNoCompaction}).
+   */
+  async compactDB(dstLevel: number, now: number): Promise<FileInfo | null> {
+    if (dstLevel === SnapshotLevel) return this.compactSnapshot(now, 0);
+    const lvl = this.compactionLevels.level(dstLevel);
+    const prevAt = prevCompactionAt(now, lvl.intervalMs);
+    const dstInfo = await this.maxLTXFileInfo(dstLevel);
+    if (dstInfo && dstInfo.createdAt > prevAt) throw ErrCompactionTooEarly;
+
+    const srcLevel = this.compactionLevels.prevLevel(dstLevel);
+    const srcInfo = await this.maxLTXFileInfo(srcLevel);
+    if (srcInfo && dstInfo && srcInfo.maxTXID <= dstInfo.minTXID) throw ErrNoCompaction;
+
+    const info = await this.compactLevel(dstLevel);
+    if (info === null) throw ErrNoCompaction;
+    return info;
+  }
+
+  /**
+   * CompactSnapshot takes a level-9 snapshot if it is time to do so and the
+   * database has advanced past the current snapshot. Mirrors `Store.CompactDB`
+   * for the snapshot level.
+   */
+  async compactSnapshot(now: number, intervalMs: number): Promise<FileInfo | null> {
+    const prevAt = prevCompactionAt(now, intervalMs);
+    const dstInfo = await this.maxLTXFileInfo(SnapshotLevel);
+    if (dstInfo && dstInfo.createdAt > prevAt) throw ErrCompactionTooEarly;
+    const pos = await (await this.localDb()).pos();
+    if (dstInfo && dstInfo.maxTXID !== 0n && dstInfo.maxTXID >= pos) throw ErrNoCompaction;
+    return this.snapshot();
+  }
+
+  /** MaxLTXFileInfo returns the highest-TXID file at a level, or null. */
+  async maxLTXFileInfo(level: number): Promise<FileInfo | null> {
+    let max: FileInfo | null = null;
+    for await (const info of this.client.ltxFiles({ level, seek: 0n, useMetadata: false })) {
+      if (max === null || info.maxTXID > max.maxTXID) max = info;
+    }
+    return max;
+  }
+
+  /**
+   * EnforceRetention prunes old snapshots and superseded files.
    *
-   * - Level-9 snapshots beyond the retention policy are deleted.
-   * - Files (any level) whose maxTXID is below the oldest retained snapshot's
-   *   maxTXID are deleted, since a retained snapshot supersedes them.
-   * - Files covered by a higher-level file and older than `l0RetentionMs` are
-   *   deleted.
-   *
-   * It never deletes files that the retained data needs to restore the current
-   * state or any point-in-time target within the retention window.
+   * 1. Snapshots older than `snapshotRetentionMs` are deleted (the newest is
+   *    always kept; `snapshotRetain` may cap how many newest are kept).
+   * 2. The resulting snapshot boundary is cascaded down through levels 0..max:
+   *    any file whose maxTXID is below the oldest retained snapshot's maxTXID
+   *    is deleted (it is superseded by that snapshot).
+   * 3. Level-0 files that have been compacted into a higher level and are older
+   *    than `l0RetentionMs` are deleted (except the newest, the live head).
    */
   async enforceRetention(options: RetentionOptions = {}): Promise<RetentionResult> {
     const now = Date.now();
-    const snapshotRetain = options.snapshotRetain ?? 2;
-    const snapshotRetentionMs = options.snapshotRetentionMs;
+    const snapshotRetentionMs = options.snapshotRetentionMs ?? 0;
+    const snapshotRetain = options.snapshotRetain ?? 0;
     const l0RetentionMs = options.l0RetentionMs ?? 0;
 
+    const { deleted: snapshotsDeleted, boundary } = await this.enforceSnapshotRetention(
+      now,
+      snapshotRetentionMs,
+      snapshotRetain,
+    );
+
+    let filesDeleted = 0;
+    if (boundary > 0n) {
+      for (let level = 0; level <= this.maxCompactionLevel; level++) {
+        filesDeleted += await this.enforceRetentionByTXID(level, boundary);
+      }
+    }
+    filesDeleted += await this.enforceL0RetentionByTime(now, l0RetentionMs);
+
+    return { snapshotsDeleted, filesDeleted, boundary };
+  }
+
+  /**
+   * EnforceSnapshotRetention deletes snapshots older than `retentionMs` and
+   * returns the boundary (max maxTXID of the deleted snapshots). The newest
+   * snapshot is always kept; `retain` may keep additional newest snapshots.
+   */
+  async enforceSnapshotRetention(
+    now: number,
+    retentionMs: number,
+    retain = 0,
+  ): Promise<{ deleted: number; boundary: bigint }> {
     const snapshots = await this.listRemoteLevel(SnapshotLevel);
     snapshots.sort((a, b) => (a.maxTXID < b.maxTXID ? -1 : a.maxTXID > b.maxTXID ? 1 : 0));
+    if (snapshots.length === 0) return { deleted: 0, boundary: 0n };
 
-    let deletedSnapshots: FileInfo[] = [];
+    const cutoff = retentionMs > 0 ? now - retentionMs : 0;
+    let retained = snapshots.filter((s) => !(retentionMs > 0 && s.createdAt < cutoff));
+    const newest = snapshots[snapshots.length - 1];
+    if (!retained.includes(newest)) retained.push(newest);
+    retained.sort((a, b) => (a.maxTXID < b.maxTXID ? -1 : a.maxTXID > b.maxTXID ? 1 : 0));
+    if (retain > 0 && retained.length > retain) retained = retained.slice(retained.length - retain);
+
+    const retainedSet = new Set(retained);
+    const deletedFiles = snapshots.filter((s) => !retainedSet.has(s));
+    await this.deleteFiles(deletedFiles);
+
     let boundary = 0n;
-    if (snapshots.length > 0) {
-      let retained: FileInfo[];
-      if (snapshotRetentionMs !== undefined) {
-        const cutoff = now - snapshotRetentionMs;
-        retained = snapshots.filter((s) => s.createdAt >= cutoff);
-      } else {
-        retained = [...snapshots];
-      }
-      if (snapshotRetain > 0 && retained.length > snapshotRetain) {
-        retained = retained.slice(retained.length - snapshotRetain);
-      }
-      // Always keep at least the newest snapshot so we never lose the base.
-      if (retained.length === 0) retained = [snapshots[snapshots.length - 1]];
+    for (const d of deletedFiles) if (d.maxTXID > boundary) boundary = d.maxTXID;
+    return { deleted: deletedFiles.length, boundary };
+  }
 
-      const retainedSet = new Set(retained);
-      deletedSnapshots = snapshots.filter((s) => !retainedSet.has(s));
-      boundary = retained.reduce(
-        (m, s) => (s.maxTXID < m ? s.maxTXID : m),
-        retained[0].maxTXID,
-      );
-      await this.deleteFiles(deletedSnapshots);
+  /**
+   * EnforceRetentionByTXID deletes files at `level` with maxTXID below `txID`,
+   * always keeping at least one file. Returns the number deleted.
+   */
+  async enforceRetentionByTXID(level: number, txID: bigint): Promise<number> {
+    if (txID <= 0n) return 0;
+    const files = await this.listRemoteLevel(level);
+    files.sort((a, b) => (a.maxTXID < b.maxTXID ? -1 : a.maxTXID > b.maxTXID ? 1 : 0));
+    if (files.length === 0) return 0;
+
+    const last = files[files.length - 1];
+    const deletedFiles = files.filter((f) => f.maxTXID < txID);
+    if (deletedFiles.length > 0 && deletedFiles[deletedFiles.length - 1] === last) {
+      deletedFiles.pop(); // always keep at least one file
     }
+    await this.deleteFiles(deletedFiles);
+    return deletedFiles.length;
+  }
 
-    // Gather every file at compaction levels 1..max as potential "coverers".
+  /**
+   * EnforceL0RetentionByTime deletes level-0 files that have been compacted into
+   * a higher level and are older than `l0RetentionMs`. It never deletes the
+   * newest level-0 file (the live head) and preserves contiguous L0 coverage by
+   * stopping at the first file that is not old enough.
+   */
+  async enforceL0RetentionByTime(now: number, l0RetentionMs: number): Promise<number> {
+    const l0 = await this.listRemoteLevel(0);
+    l0.sort((a, b) => (a.maxTXID < b.maxTXID ? -1 : a.maxTXID > b.maxTXID ? 1 : 0));
+    if (l0.length === 0) return 0;
+
+    const newest = l0[l0.length - 1];
     const coverers: FileInfo[] = [];
     for (let level = 1; level <= this.maxCompactionLevel; level++) {
       for await (const info of this.client.ltxFiles({ level, seek: 0n, useMetadata: false })) {
@@ -506,23 +747,15 @@ export class Replica {
       }
     }
 
-    const toDelete: FileInfo[] = [];
-    for (let level = 0; level <= this.maxCompactionLevel; level++) {
-      for await (const info of this.client.ltxFiles({ level, seek: 0n, useMetadata: false })) {
-        // Below the oldest retained snapshot -> superseded by that snapshot.
-        if (info.maxTXID < boundary) {
-          toDelete.push(info);
-          continue;
-        }
-        // Covered by a higher-level file and old enough.
-        if (now - info.createdAt >= l0RetentionMs && this.isCoveredByHigherLevel(info, coverers)) {
-          toDelete.push(info);
-        }
-      }
+    const threshold = now - l0RetentionMs;
+    const deletedFiles: FileInfo[] = [];
+    for (const info of l0) {
+      if (info === newest) continue; // never delete the live head
+      if (info.createdAt > threshold) break; // preserve contiguous L0 coverage
+      if (this.isCoveredByHigherLevel(info, coverers)) deletedFiles.push(info);
     }
-    await this.deleteFiles(toDelete);
-
-    return { snapshotsDeleted: deletedSnapshots.length, filesDeleted: toDelete.length, boundary };
+    await this.deleteFiles(deletedFiles);
+    return deletedFiles.length;
   }
 
   /** Returns true if `info` is fully contained in a file at a higher level. */

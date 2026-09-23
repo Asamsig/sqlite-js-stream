@@ -31,8 +31,10 @@ import type { Logger } from './util/logger.ts';
 /** Sentinel error to stop early iteration in FindLTXFiles. */
 export const ErrStopIter = Symbol('stop iterator');
 
+import { SnapshotLevel } from './ltx/constants.ts';
+
 /** SnapshotLevel is the LTX level reserved for full snapshots. */
-export const SnapshotLevel = 9;
+export { SnapshotLevel };
 
 export interface ReplicaClient {
   /** Type returns the type of client (e.g. "file"). */

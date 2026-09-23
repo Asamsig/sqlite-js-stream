@@ -20,6 +20,7 @@ export * from './stream.ts';
 export * from './compactor.ts';
 export * from './streaming-compactor.ts';
 export * from './file-info.ts';
+export * from './compaction-level.ts';
 
 // LZ4 block codec is internal (not part of the public LTX surface) but
 // exposed for the WAL/DB layers.

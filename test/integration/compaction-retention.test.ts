@@ -56,10 +56,13 @@ test('compact moves L0 files into a level-1 file and GC can prune the source', a
     assert.equal(plan[0].level, 1);
     assert.equal(plan[0].maxTXID, 4n);
 
-    // GC removes the L0 source files now that L1 covers them.
+    // GC removes the L0 source files now that L1 covers them. The newest L0
+    // file is the live head and is always retained (matching litestream).
     const gc = await replica.enforceRetention({ l0RetentionMs: 0 });
-    assert.ok(gc.filesDeleted >= 4);
-    assert.equal((await countLevel(client, 0)).length, 0);
+    assert.ok(gc.filesDeleted >= 3, 'old L0 files were pruned');
+    const remainingL0 = await countLevel(client, 0);
+    assert.equal(remainingL0.length, 1, 'only the newest level-0 file is retained');
+    assert.equal(remainingL0[0].maxTXID, 4n, 'the retained head is the newest');
     assert.equal((await countLevel(client, 1)).length, 1);
 
     await assertRestored(replica, join(makeTempDir('restore-'), 'c.db'), 5);
@@ -112,10 +115,11 @@ test('incremental sync resumes after compaction and GC without reusing TXIDs', a
     t.db.exec("INSERT INTO t (name) VALUES ('b')");
     await replica.sync(); // L0 (2..2)
 
-    // Compact L0 -> L1 and prune the (now covered) level-0 files.
+    // Compact L0 -> L1 and prune the (now covered) level-0 files. The newest
+    // level-0 file (2..2) is the live head and is retained.
     await replica.compact({ dstLevel: 1 });
     await replica.enforceRetention({ l0RetentionMs: 0 });
-    assert.equal((await countLevel(client, 0)).length, 0);
+    assert.equal((await countLevel(client, 0)).length, 1, 'the head L0 is retained');
     assert.equal((await countLevel(client, 1)).length, 1);
 
     // A later write must continue the sequence (TXID 3), not reuse 1..2.
@@ -123,9 +127,10 @@ test('incremental sync resumes after compaction and GC without reusing TXIDs', a
     await replica.sync();
 
     const l0 = await countLevel(client, 0);
-    assert.equal(l0.length, 1, 'a new level-0 file should be created');
-    assert.equal(l0[0].minTXID, 3n, 'new L0 starts at TXID 3');
-    assert.equal(l0[0].maxTXID, 3n);
+    assert.equal(l0.length, 2, 'kept head + a new level-0 file');
+    assert.equal(l0[0].minTXID, 2n, 'oldest level-0 file is the retained head');
+    assert.equal(l0[1].minTXID, 3n, 'new L0 starts at TXID 3');
+    assert.equal(l0[1].maxTXID, 3n);
     assert.equal(await replica.calcPos(), 3n);
 
     await assertRestored(replica, join(makeTempDir('restore-'), 'r.db'), 3);
@@ -158,12 +163,17 @@ test('run() schedules compaction and retention while replicating', async () => {
     }
 
     // Wait until all rows are replicated, then let the scheduling loop
-    // compact the pending L0 files and GC them (settled state).
+    // compact the pending L0 files into higher levels (settled state).
     await waitForRestoredRows(replica, outPath, 7, 8000);
     const deadline = Date.now() + 8000;
-    while ((await countLevel(client, 0)).length > 0) {
+    for (;;) {
+      let anyCompacted = 0;
+      for (let level = 1; level <= 3; level++) {
+        anyCompacted += (await countLevel(client, level)).length;
+      }
+      if (anyCompacted >= 1) break;
       if (Date.now() > deadline) {
-        throw new Error('timed out waiting for compaction to prune level-0 files');
+        throw new Error('timed out waiting for compaction to run');
       }
       await sleep(150);
     }
@@ -175,8 +185,11 @@ test('run() schedules compaction and retention while replicating', async () => {
     for (let level = 1; level <= 3; level++) compacted += (await countLevel(client, level)).length;
     assert.ok(compacted >= 1, 'compaction produced files at a higher level');
 
-    // Coverage-based GC should have pruned the compacted L0 files.
-    assert.equal((await countLevel(client, 0)).length, 0, 'no leftover level-0 files after GC');
+    // The loop always retains at least the live-head level-0 file.
+    assert.ok(
+      (await countLevel(client, 0)).length >= 1,
+      'the live-head level-0 file is retained',
+    );
   } finally {
     replica.close();
     t.close();

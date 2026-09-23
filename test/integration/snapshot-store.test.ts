@@ -10,6 +10,17 @@ import {
   calcRestorePlan,
 } from '../../src/index.ts';
 import { createWALDB, makeTempDir } from '../helpers/make-db.ts';
+import type { FileInfo } from '../../src/index.ts';
+
+async function fileCount(client: FileReplicaClient, level: number): Promise<number> {
+  let n = 0;
+  const files: FileInfo[] = [];
+  for await (const f of client.ltxFiles({ level, seek: 0n, useMetadata: false })) {
+    files.push(f);
+    n++;
+  }
+  return n;
+}
 
 test('level-9 snapshot becomes the restore base', async () => {
   const t = createWALDB(['a', 'b', 'c']);
@@ -96,9 +107,9 @@ test('Store compacts and enforces retention across databases', async () => {
     await store.compactAll();
     await store.enforceRetentionAll({ l0RetentionMs: 0 });
 
-    let l0 = 0;
-    for await (const _ of client.ltxFiles({ level: 0, seek: 0n, useMetadata: false })) l0++;
-    assert.equal(l0, 0, 'level-0 files are pruned after compaction + GC');
+    // Only the live-head level-0 file is retained after GC (like litestream).
+    const l0 = await fileCount(client, 0);
+    assert.equal(l0, 1, 'only the live-head level-0 file remains after compaction + GC');
 
     const out = join(makeTempDir('restore-'), 'store.db');
     await replica.restore({ outputPath: out });

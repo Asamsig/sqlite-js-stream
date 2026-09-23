@@ -37,6 +37,9 @@ export const PageHeaderFlagSize = 0x0001;
 /** MaxPageSize is the maximum allowed SQLite page size. */
 export const MaxPageSize = 65536;
 
+/** SnapshotLevel is the LTX level reserved for full-database snapshots. */
+export const SnapshotLevel = 9;
+
 /** Error messages / codes. */
 export const ErrInvalidFile = 'invalid LTX file';
 export const ErrDecoderClosed = 'ltx decoder closed';
