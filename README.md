@@ -314,32 +314,46 @@ restore fast, compact those into higher levels and prune data that has been supe
 
 ```ts
 // Merge pending level-0 files into a level-1 file (and 1→2→3 up to maxCompactionLevel).
-await replica.compact();
+await replica.compact({ dstLevel: 1 });
 
-// Delete old snapshots and files that a retained snapshot supersedes.
+// Time-based retention: delete snapshots older than 24h (always keeping the
+// newest), cascade the boundary down through the other levels, and delete
+// level-0 files that were compacted into level-1 once they age past 5m.
 const result = await replica.enforceRetention({
-  snapshotRetain: 2,       // keep the 2 newest level-9 snapshots
-  snapshotRetentionMs: 0,  // (or delete snapshots older than N ms)
-  l0RetentionMs: 0,        // delete compacted sources immediately
+  snapshotRetentionMs: 24 * 60 * 60 * 1000,
+  l0RetentionMs: 5 * 60 * 1000,
 });
 ```
 
-`Replica.run()` can drive all of this on separate intervals, and `Store` orchestrates it across every
-replica:
+`Replica.run()` can drive all of this on their own schedules, and `Store` orchestrates it across
+every replica.
 
 ```ts
+import { CompactionLevels } from 'sqlite-js-stream';
+
+// Each level is compacted at most once per wall-clock bucket (L1 every 30s,
+// L2 every 5m, L3 every 1h) — mirrors litestream's per-level pacing.
+const levels = new CompactionLevels([
+  { level: 0, intervalMs: 0 },
+  { level: 1, intervalMs: 30_000 },
+  { level: 2, intervalMs: 300_000 },
+  { level: 3, intervalMs: 3_600_000 },
+]);
+
 await store.run({
   intervalMs: 1000,
-  compactionIntervalMs: 30_000,
-  retentionIntervalMs: 60_000,
-  retention: { snapshotRetain: 2, l0RetentionMs: 0 },
+  compactionLevels: levels,
+  snapshotIntervalMs: 24 * 60 * 60 * 1000,
+  snapshotRetentionMs: 24 * 60 * 60 * 1000,
+  l0RetentionMs: 5 * 60 * 1000,
   signal,
 });
 ```
 
 Compaction is **streaming** (bounded memory) and only deletes a lower-level file after the higher
 level is written *and* uploaded, so a mid-compaction failure never loses data. Retention never deletes
-files needed to restore any point within the retention window.
+files needed to restore any point within the retention window, and the live-head level-0 file is
+always retained.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#compaction--retention) for the full model.
 
