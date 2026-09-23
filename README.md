@@ -380,6 +380,36 @@ The file backend uses an exclusive-create lease with a content-hash token; the S
 (`import { S3Leaser } from 'sqlite-js-stream-backend-s3'`) uses S3 `If-None-Match`/`If-Match`
 conditional writes so racy acquirers cannot both win.
 
+### ⚠️ This is a backup tool, not a distributed database
+
+The lease coordinates **which host writes to storage**. It does **not** merge, compare, or reconcile
+the actual data in your databases. Be very clear about what you're pointing at the same prefix.
+
+**Multiple hosts are only safe if they hold the *same* database content** (e.g. a DR/standby host that
+was restored from the same backup). The lease then prevents two hosts from both writing, and gives
+you automatic failover when the primary stops.
+
+**Do NOT point hosts that hold *different* data at the same prefix.** SQLite is a
+single-writer, single-file database. If host A has `row id=1 → "X"` and host B has
+`row id=1 → "Y"` and they share one prefix, here is what happens:
+
+| Host A local DB      | Host B local DB      | What lands in S3 |
+|----------------------|---------------------|------------------|
+| `row id=1 → "X"`     | `row id=1 → "Y"`     | `"X"` (only if **A** is the primary) |
+
+- Whichever host is the **primary** gets backed up. The other host's value is **never uploaded**, is
+  not merged, and is effectively **lost** from the backup's perspective.
+- When you restore, you get exactly one host's state. There is **no conflict resolution**. `"Y"` is
+  simply gone.
+
+**Choose the right setup:**
+
+| If you need…                                            | Do this |
+|---------------------------------------------------------|----------|
+| Each host owns a **different** database                 | Give each its own prefix, e.g. `app/${tenantId}` — separate backup per DB, no conflict. |
+| Multiple app instances sharing one consistent dataset | Don't use SQLite + this replication. Use a client-server DB (Postgres/MySQL) or a real shared-file lock + single writer. |
+| Same data on every host (failover / DR)                 | Keep exactly one writer. On failover, **restore the standby from S3 first**, then let it take the lease — don't let a stale local file start writing. |
+
 ---
 
 ## Documentation

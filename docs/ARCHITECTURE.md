@@ -168,6 +168,50 @@ acquires/renews/releases a `lock.json` lease; `Replica.run()` uses it to choose 
   local/single-host leases.
 - **S3 backend** (`S3Leaser`, addon): real conditional writes via S3 `If-None-Match`/`If-Match`.
 
+### What the lease does *not* do (single-writer semantics)
+
+**This is a backup & disaster-recovery tool for one SQLite database. It is not a distributed
+database.** The lease elects a single *writer to storage*, but it never merges, compares, or reconciles
+the contents of your databases.
+
+The layer the lease protects is **only** the replication/storage path (so two hosts can't both push LTX
+files to the same prefix). It does **not** coordinate writes inside your SQLite files. Each `Replica`
+reads **its own local `-wal`**; there is no cross-host write ordering, no consensus, and no merge.
+
+Concretely, if host A has `row id=1 → "X"` and host B has `row id=1 → "Y"` in their *separate* local
+databases, and both point at one prefix:
+
+1. Only the **primary** host pushes to S3.
+2. The backup records the primary's value (`"X"` if A is primary).
+3. The follower's value (`"Y"`) is **never uploaded and never merged** — restore yields exactly one
+   host's state, and `"Y"` is unrecoverable from the backup.
+
+SQLite itself serializes writes *within a single DB file* (last commit wins via the WAL). But there is
+**no** ordering or coordination across two separate SQLite files on two hosts. A single SQLite file has
+one writer by design, so pointing several hosts at one backup prefix only makes sense when they all hold
+the **same** logical data.
+
+### When multi-host + lease is correct
+
+- **Standby / DR failover**: every host holds the *same* logical DB (the standby is restored from the
+  same backup). The lease picks one writer and gives automatic takeover when the primary's lease
+expires.
+
+  > On failover, the standby has a **gap**: it only contains data up to the last backup, not writes the
+  > primary made in the last few seconds before it died. Always restore the standby from S3 *before*
+  > it takes the lease.
+
+- **Preventing split-brain in the backup**: with a lease, a secondary can never write, so it cannot
+  corrupt the shared prefix.
+
+### When it is *not* correct
+
+- **Different data on different hosts sharing one prefix.** Each host should get its own prefix
+  (`app/${tenantId}`) so the backups stay separate. Sharing one prefix across divergent DBs interleaves
+  their LTX files and corrupts the replica.
+- **Horizontal write scaling of one logical dataset.** That requires a client-server database, not
+  SQLite + LTX replication.
+
 ---
 
 ## Checksums
@@ -205,5 +249,10 @@ acquires/renews/releases a `lock.json` lease; `Replica.run()` uses it to choose 
   litestream. We deliberately do **not** read legacy v0.3.x generation backups
   (`generations/…/snapshots|wal/*.lz4`); the LZ4 frame codec and generation-listing interfaces that
   would be needed are intentionally omitted.
+- **Single-writer semantics (important).** This is a backup/DR tool for **one** SQLite database, not
+  a distributed database. The lease elects a single writer to storage but never merges or reconciles
+  data across hosts. Pointing several hosts at one prefix is only correct when they hold the **same**
+  logical data (see [Distributed leasing](#distributed-leasing)); separate databases must use separate
+  prefixes.
 - Cloud backends beyond S3 (GCS/Azure/SFTP/NATS), VFS mirroring, and the IPC server are not yet
   implemented. Distributed leasing is implemented for the file and S3 backends (see above).

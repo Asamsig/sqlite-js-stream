@@ -537,6 +537,11 @@ backups.
    (`FileSink`); the S3 addon uses multipart upload for objects > 5 MiB. Peak memory is bounded by
    one page buffer + the smallest page index. The WAL is still read in full (it is small relative
    to the DB), and a >1 GB lock-page validation is a further stretch goal.
+8. **Single-writer semantics / divergence (important).** This is a backup/DR tool for **one**
+   SQLite database, not a distributed database. The lease elects one writer *to storage* but does
+   **not** merge or reconcile data across hosts. Multiple hosts may share one prefix **only** when
+   they hold the **same** logical data (DR/standby, restored from the same backup); different DBs
+   must use different prefixes. Documented in README + ARCHITECTURE.
 
 ---
 
