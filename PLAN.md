@@ -499,7 +499,10 @@ backups.
 
 - **Cloud backends:** `s3/`, `gs/`, `abs/`, `sftp/`, `nats/` replica clients + their leaser
   (`lock.json` conditional writes).
-- **Distributed leasing** (`src/leaser.ts`).
+- **Distributed leasing** — ✅ **implemented** (`src/leaser.ts` + file/S3 leasers): a `Leaser`
+  acquires/renews/releases a `lock.json` lease; `Replica.run()` becomes a **primary** (writes) or a
+  **follower** (polls), gating all storage-write methods on lease ownership. File backend uses
+  exclusive-create + content-hash etag; S3 uses `If-None-Match`/`If-Match` conditional writes.
 - **VFS real-time mirroring** (`vfs.go` port — hook into SQLite VFS; likely deferred).
 - **IPC Unix-socket control server** (`server.go`).
 - **`litestream ltx`/CLI wrapper** only if a CLI is desired.

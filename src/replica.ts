@@ -36,6 +36,13 @@ import {
 import { LocalDatabase } from './db.ts';
 import type { ReplicaClient } from './replica-client.ts';
 import { SnapshotLevel } from './replica-client.ts';
+import {
+  DefaultLeaseRenewalBuffer,
+  ErrLeaseNotHeld,
+  Lease,
+  LeaseExistsError,
+  type Leaser,
+} from './leaser.ts';
 import { FileSink } from './util/fs.ts';
 import type { Logger } from './util/logger.ts';
 import { noopLogger } from './util/logger.ts';
@@ -164,12 +171,15 @@ export class Replica {
   private posValue: bigint | null = null;
   private db: LocalDatabase | null = null;
   private compactionLevelsValue: CompactionLevels = defaultCompactionLevels();
+  private leaserValue: Leaser | null = null;
+  private leasePrimary = true;
+  private leaseCurrent: Lease | null = null;
 
   constructor(
     path: string,
     client: ReplicaClient,
     logger: Logger = noopLogger,
-    options: { maxLevel?: number; compactionLevels?: CompactionLevels } = {},
+    options: { maxLevel?: number; compactionLevels?: CompactionLevels; leaser?: Leaser } = {},
   ) {
     this.path = path;
     this.client = client;
@@ -178,6 +188,37 @@ export class Replica {
       this.compactionLevelsValue = options.compactionLevels;
     } else if (options.maxLevel !== undefined) {
       this.maxCompactionLevel = options.maxLevel;
+    }
+    if (options.leaser) {
+      this.leaserValue = options.leaser;
+      // A leaser is not held until acquired, so a fresh replica starts as a
+      // follower until {@link run} (or an explicit acquire) makes it primary.
+      this.leasePrimary = false;
+    }
+  }
+
+  /** Leaser optionally bounds this replica to a single primary across hosts. */
+  get leaser(): Leaser | null {
+    return this.leaserValue;
+  }
+
+  set leaser(leaser: Leaser | null) {
+    this.leaserValue = leaser;
+  }
+
+  /**
+   * IsPrimary reports whether this replica may currently write. Always true
+   * when no {@link Leaser} is configured; false while another host holds the
+   * lease. Updated by {@link run}.
+   */
+  isPrimary(): boolean {
+    return this.leasePrimary;
+  }
+
+  /** @internal Throws if a leaser is set but this replica does not hold it. */
+  private assertCanWrite(): void {
+    if (this.leaserValue !== null && !this.leasePrimary) {
+      throw new ErrLeaseNotHeld();
     }
   }
 
@@ -241,6 +282,7 @@ export class Replica {
    * written locally, or null if there was nothing new to do.
    */
   async sync(): Promise<FileInfo | null> {
+    this.assertCanWrite();
     await this.client.init();
     const db = await this.localDb();
     const info = await db.sync();
@@ -282,6 +324,25 @@ export class Replica {
     const l0RetentionCheckIntervalMs =
       opt.l0RetentionCheckIntervalMs ?? DefaultL0RetentionCheckIntervalMs;
 
+    // Try to acquire the lease up front. If held by another host we become a
+    // follower and poll until it is available. Without a leaser we are primary.
+    const leaser = this.leaserValue;
+    let primary = leaser === null;
+    if (leaser !== null) {
+      try {
+        this.leaseCurrent = await leaser.acquireLease();
+        primary = true;
+      } catch (err) {
+        if (err instanceof LeaseExistsError) {
+          this.logger.debug('lease held elsewhere; running as follower', err);
+          primary = false;
+        } else {
+          throw err;
+        }
+      }
+    }
+    this.leasePrimary = primary;
+
     let lastCompaction = 0;
     let lastRetention = 0;
     let snapshotNext =
@@ -299,14 +360,57 @@ export class Replica {
     }
 
     while (!signal?.aborted) {
-      try {
-        await this.sync();
-      } catch (err) {
-        this.logger.error('replica sync error', err);
+      const now = Date.now();
+
+      // Lease management: followers poll to acquire; the primary renews before
+      // expiry and reverts to follower if it loses the lease.
+      if (leaser !== null) {
+        if (!primary) {
+          try {
+            this.leaseCurrent = await leaser.acquireLease();
+            primary = true;
+            this.leasePrimary = true;
+          } catch (err) {
+            if (!(err instanceof LeaseExistsError)) {
+              this.logger.error('lease acquire error', err);
+            }
+            await sleep(intervalMs, undefined, { signal });
+            continue;
+          }
+        } else if (this.leaseCurrent !== null) {
+          const renewAt =
+            this.leaseCurrent.expiresAt - Math.min(DefaultLeaseRenewalBuffer, intervalMs);
+          if (now >= renewAt) {
+            try {
+              this.leaseCurrent = await leaser.renewLease(this.leaseCurrent);
+            } catch (err) {
+              if (err instanceof ErrLeaseNotHeld) {
+                this.logger.debug('lost lease; reverting to follower', err);
+                primary = false;
+                this.leasePrimary = false;
+                this.leaseCurrent = null;
+              } else {
+                this.logger.error('lease renew error', err);
+              }
+            }
+          }
+        }
+      }
+
+      // Only the primary (or a leaser-less replica) performs writes.
+      if (leaser === null || primary) {
+        try {
+          await this.sync();
+        } catch (err) {
+          this.logger.error('replica sync error', err);
+        }
       }
       if (signal?.aborted) break;
 
-      const now = Date.now();
+      if (leaser !== null && !primary) {
+        await sleep(intervalMs, undefined, { signal });
+        continue;
+      }
 
       // Compaction.
       if (useLegacyCompaction) {
@@ -372,10 +476,22 @@ export class Replica {
         break; // aborted during the sleep
       }
     }
+
+    // Release the lease on shutdown so another host can take over promptly.
+    if (leaser !== null && this.leaseCurrent !== null) {
+      try {
+        await leaser.releaseLease(this.leaseCurrent);
+      } catch (err) {
+        this.logger.debug('lease release error', err);
+      }
+      this.leaseCurrent = null;
+      this.leasePrimary = false;
+    }
   }
 
   /** Snapshot writes and uploads a level-9 full-database LTX file. */
   async snapshot(): Promise<FileInfo | null> {
+    this.assertCanWrite();
     const info = await (await this.localDb()).snapshot();
     if (info) {
       await this.uploadLtxFile(9, info.minTXID, info.maxTXID);
@@ -508,6 +624,7 @@ export class Replica {
    * was nothing to compact.
    */
   async compact(options: CompactOptions = {}): Promise<FileInfo | null> {
+    this.assertCanWrite();
     if (options.dstLevel !== undefined) {
       if (options.dstLevel < 1 || options.dstLevel > this.maxCompactionLevel) return null;
       return this.compactLevel(options.dstLevel);
@@ -527,6 +644,7 @@ export class Replica {
    * performed by {@link enforceRetention}.
    */
   async compactLevel(dstLevel: number): Promise<FileInfo | null> {
+    this.assertCanWrite();
     if (dstLevel < 1 || dstLevel > this.maxCompactionLevel) return null;
     const srcLevel = dstLevel - 1;
 
@@ -607,6 +725,7 @@ export class Replica {
    * and skips when there is nothing to do (throws {@link ErrNoCompaction}).
    */
   async compactDB(dstLevel: number, now: number): Promise<FileInfo | null> {
+    this.assertCanWrite();
     if (dstLevel === SnapshotLevel) return this.compactSnapshot(now, 0);
     const lvl = this.compactionLevels.level(dstLevel);
     const prevAt = prevCompactionAt(now, lvl.intervalMs);
@@ -628,6 +747,7 @@ export class Replica {
    * for the snapshot level.
    */
   async compactSnapshot(now: number, intervalMs: number): Promise<FileInfo | null> {
+    this.assertCanWrite();
     const prevAt = prevCompactionAt(now, intervalMs);
     const dstInfo = await this.maxLTXFileInfo(SnapshotLevel);
     if (dstInfo && dstInfo.createdAt > prevAt) throw ErrCompactionTooEarly;
@@ -657,6 +777,7 @@ export class Replica {
    *    than `l0RetentionMs` are deleted (except the newest, the live head).
    */
   async enforceRetention(options: RetentionOptions = {}): Promise<RetentionResult> {
+    this.assertCanWrite();
     const now = Date.now();
     const snapshotRetentionMs = options.snapshotRetentionMs ?? 0;
     const snapshotRetain = options.snapshotRetain ?? 0;
@@ -689,6 +810,7 @@ export class Replica {
     retentionMs: number,
     retain = 0,
   ): Promise<{ deleted: number; boundary: bigint }> {
+    this.assertCanWrite();
     const snapshots = await this.listRemoteLevel(SnapshotLevel);
     snapshots.sort((a, b) => (a.maxTXID < b.maxTXID ? -1 : a.maxTXID > b.maxTXID ? 1 : 0));
     if (snapshots.length === 0) return { deleted: 0, boundary: 0n };
@@ -714,6 +836,7 @@ export class Replica {
    * always keeping at least one file. Returns the number deleted.
    */
   async enforceRetentionByTXID(level: number, txID: bigint): Promise<number> {
+    this.assertCanWrite();
     if (txID <= 0n) return 0;
     const files = await this.listRemoteLevel(level);
     files.sort((a, b) => (a.maxTXID < b.maxTXID ? -1 : a.maxTXID > b.maxTXID ? 1 : 0));
@@ -735,6 +858,7 @@ export class Replica {
    * stopping at the first file that is not old enough.
    */
   async enforceL0RetentionByTime(now: number, l0RetentionMs: number): Promise<number> {
+    this.assertCanWrite();
     const l0 = await this.listRemoteLevel(0);
     l0.sort((a, b) => (a.maxTXID < b.maxTXID ? -1 : a.maxTXID > b.maxTXID ? 1 : 0));
     if (l0.length === 0) return 0;

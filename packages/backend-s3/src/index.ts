@@ -14,6 +14,8 @@ export {
   type S3ReplicaClientOptions,
 } from './replica-client.ts';
 
+export { S3Leaser } from './leaser.ts';
+
 import { registerReplicaClientFactory } from 'sqlite-js-stream';
 import { newReplicaClientFromURL } from './replica-client.ts';
 

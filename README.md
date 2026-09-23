@@ -357,6 +357,29 @@ always retained.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#compaction--retention) for the full model.
 
+### Distributed leasing
+
+When several replicas point at the same storage, only one may write at a time. Give the replica a
+`Leaser` (a `lock.json` lease) and `run()` will make exactly one replica the active **primary**;
+the others become idle **followers** that poll until the lease is free. Storage writes are gated on
+lease ownership, so a secondary can never split the brain.
+
+```ts
+import { FileLeaser } from 'sqlite-js-stream';
+
+replica.leaser = new FileLeaser('/data/replica'); // becomes primary if the lease is free
+await replica.run({ intervalMs: 1000, signal });
+
+// Query which mode we are in:
+if (replica.isPrimary()) {
+  // we are writing
+}
+```
+
+The file backend uses an exclusive-create lease with a content-hash token; the S3 addon
+(`import { S3Leaser } from 'sqlite-js-stream-backend-s3'`) uses S3 `If-None-Match`/`If-Match`
+conditional writes so racy acquirers cannot both win.
+
 ---
 
 ## Documentation

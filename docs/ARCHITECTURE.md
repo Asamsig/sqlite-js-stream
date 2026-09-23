@@ -148,6 +148,27 @@ left off, even after a restart.
 
 ---
 
+## Distributed leasing
+
+When several replicas share a storage path, only one may write. A `Leaser` (from `src/leaser.ts`)
+acquires/renews/releases a `lock.json` lease; `Replica.run()` uses it to choose a **primary**
+(writes) vs a **follower** (idle, polls). All storage-write methods (`sync`, `snapshot`, `compact*`,
+`enforceRetention*`) are gated on lease ownership, so a secondary can never write.
+
+- `Lease` = `{ generation, expiresAt, owner, etag }`; `etag` is the conditional-write token.
+- `acquireLease` uses `If-None-Match: *` when no lease exists and `If-Match: <etag>` when replacing an
+  expired one — two racy acquirers cannot both win (one gets `412 PreconditionFailed`).
+- `renewLease` uses `If-Match: <etag>` and throws `ErrLeaseNotHeld` on mismatch (we lost it).
+- `releaseLease` deletes with `If-Match: <etag>`; missing object = already released.
+- A follower polls `acquireLease` each loop; the primary renews before expiry and reverts to follower
+  if the renew fails. On shutdown the primary releases the lease.
+
+- **File backend** (`FileLeaser`): exclusive-create (`wx`) + content-hash etag — fine for
+  local/single-host leases.
+- **S3 backend** (`S3Leaser`, addon): real conditional writes via S3 `If-None-Match`/`If-Match`.
+
+---
+
 ## Checksums
 
 - **LTX page checksums & file checksum** use **CRC-64 ISO** (`crc64.MakeTable(crc64.ISO)`), matching
@@ -183,5 +204,5 @@ left off, even after a restart.
   litestream. We deliberately do **not** read legacy v0.3.x generation backups
   (`generations/…/snapshots|wal/*.lz4`); the LZ4 frame codec and generation-listing interfaces that
   would be needed are intentionally omitted.
-- Cloud backends beyond S3, distributed leasing (`lock.json` conditional writes for multi-replica
-  safety), VFS mirroring, and the IPC server are not yet implemented.
+- Cloud backends beyond S3 (GCS/Azure/SFTP/NATS), VFS mirroring, and the IPC server are not yet
+  implemented. Distributed leasing is implemented for the file and S3 backends (see above).

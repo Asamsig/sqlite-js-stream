@@ -10,6 +10,7 @@ import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
+  DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
   HeadBucketCommand,
@@ -53,6 +54,9 @@ export class MemoryS3 {
     }
     if (command instanceof PutObjectCommand) {
       return this.put(command);
+    }
+    if (command instanceof DeleteObjectCommand) {
+      return this.deleteOne(command);
     }
     if (command instanceof DeleteObjectsCommand) {
       return this.delete(command);
@@ -157,6 +161,7 @@ export class MemoryS3 {
       ContentLength: body.length,
       LastModified: obj.lastModified,
       Metadata: obj.metadata,
+      ETag: fakeEtag(obj.body),
     };
   }
 
@@ -170,12 +175,33 @@ export class MemoryS3 {
         : raw !== undefined
           ? Buffer.from(String(raw))
           : Buffer.alloc(0);
+    const etag = fakeEtag(body);
+
+    if (cmd.input.IfNoneMatch === '*') {
+      if (this.objects.has(k)) throw precondition(k);
+    } else if (cmd.input.IfMatch !== undefined && cmd.input.IfMatch !== null) {
+      const existing = this.objects.get(k);
+      if (!existing || fakeEtag(existing.body) !== cmd.input.IfMatch) throw precondition(k);
+    }
+
     this.objects.set(k, {
       body,
       metadata: cmd.input.Metadata ?? {},
       lastModified: new Date(),
     });
-    return { ETag: 'fake', ContentLength: body.length };
+    return { ETag: etag, ContentLength: body.length };
+  }
+
+  private deleteOne(cmd: any) {
+    const k = this.key(cmd.input.Bucket, cmd.input.Key);
+    if (cmd.input.IfMatch !== undefined && cmd.input.IfMatch !== null) {
+      const existing = this.objects.get(k);
+      if (!existing) throw notFound(k);
+      if (fakeEtag(existing.body) !== cmd.input.IfMatch) throw precondition(k);
+    }
+    const removed = this.objects.delete(k);
+    if (!removed) throw notFound(k);
+    return {};
   }
 
   private delete(cmd: any) {
@@ -200,6 +226,14 @@ export class MemoryS3 {
 function notFound(key: string): Error {
   const err = new Error(`Not Found: ${key}`);
   (err as any).name = 'NotFound';
+  (err as any).$metadata = { httpStatusCode: 404 };
+  return err;
+}
+
+function precondition(key: string): Error {
+  const err = new Error(`Precondition Failed: ${key}`);
+  (err as any).name = 'PreconditionFailed';
+  (err as any).$metadata = { httpStatusCode: 412 };
   return err;
 }
 
