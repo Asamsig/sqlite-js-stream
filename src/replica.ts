@@ -174,6 +174,8 @@ export class Replica {
   private leaserValue: Leaser | null = null;
   private leasePrimary = true;
   private leaseCurrent: Lease | null = null;
+  private leaseTimer: NodeJS.Timeout | null = null;
+  private runActive = false;
 
   constructor(
     path: string,
@@ -326,17 +328,20 @@ export class Replica {
 
     // Try to acquire the lease up front. If held by another host we become a
     // follower and poll until it is available. Without a leaser we are primary.
+    this.runActive = true;
     const leaser = this.leaserValue;
     let primary = leaser === null;
     if (leaser !== null) {
       try {
         this.leaseCurrent = await leaser.acquireLease();
         primary = true;
+        this.scheduleLeaseRenewal();
       } catch (err) {
         if (err instanceof LeaseExistsError) {
           this.logger.debug('lease held elsewhere; running as follower', err);
           primary = false;
         } else {
+          this.runActive = false;
           throw err;
         }
       }
@@ -362,38 +367,22 @@ export class Replica {
     while (!signal?.aborted) {
       const now = Date.now();
 
-      // Lease management: followers poll to acquire; the primary renews before
-      // expiry and reverts to follower if it loses the lease.
-      if (leaser !== null) {
-        if (!primary) {
-          try {
-            this.leaseCurrent = await leaser.acquireLease();
-            primary = true;
-            this.leasePrimary = true;
-          } catch (err) {
-            if (!(err instanceof LeaseExistsError)) {
-              this.logger.error('lease acquire error', err);
-            }
-            await sleep(intervalMs, undefined, { signal });
-            continue;
+      // Follower management: poll to acquire the lease. The primary never
+      // renews here — a dedicated timer ({@link scheduleLeaseRenewal}) renews it
+      // independently of the loop cadence, so a large `intervalMs` cannot let the
+      // lease expire.
+      if (leaser !== null && !primary) {
+        try {
+          this.leaseCurrent = await leaser.acquireLease();
+          primary = true;
+          this.leasePrimary = true;
+          this.scheduleLeaseRenewal();
+        } catch (err) {
+          if (!(err instanceof LeaseExistsError)) {
+            this.logger.error('lease acquire error', err);
           }
-        } else if (this.leaseCurrent !== null) {
-          const renewAt =
-            this.leaseCurrent.expiresAt - Math.min(DefaultLeaseRenewalBuffer, intervalMs);
-          if (now >= renewAt) {
-            try {
-              this.leaseCurrent = await leaser.renewLease(this.leaseCurrent);
-            } catch (err) {
-              if (err instanceof ErrLeaseNotHeld) {
-                this.logger.debug('lost lease; reverting to follower', err);
-                primary = false;
-                this.leasePrimary = false;
-                this.leaseCurrent = null;
-              } else {
-                this.logger.error('lease renew error', err);
-              }
-            }
-          }
+          await sleep(intervalMs, undefined, { signal });
+          continue;
         }
       }
 
@@ -477,7 +466,9 @@ export class Replica {
       }
     }
 
-    // Release the lease on shutdown so another host can take over promptly.
+    // Stop the renewal timer and release the lease so another host can take
+    // over promptly.
+    this.stopLeaseRenewal();
     if (leaser !== null && this.leaseCurrent !== null) {
       try {
         await leaser.releaseLease(this.leaseCurrent);
@@ -486,6 +477,53 @@ export class Replica {
       }
       this.leaseCurrent = null;
       this.leasePrimary = false;
+    }
+    this.runActive = false;
+  }
+
+  /**
+   * Schedules the next lease renewal to fire just before expiry, independent of
+   * the run-loop cadence. Reschedules after every successful renewal.
+   */
+  private scheduleLeaseRenewal(): void {
+    this.stopLeaseRenewal();
+    if (this.leaserValue === null || this.leaseCurrent === null) return;
+    const delay = Math.max(
+      100,
+      this.leaseCurrent.expiresAt - DefaultLeaseRenewalBuffer - Date.now(),
+    );
+    this.leaseTimer = setTimeout(() => {
+      this.leaseTimer = null;
+      void this.renewLeaseLoop();
+    }, delay);
+  }
+
+  /** Renews the lease and reschedules; reverts to follower if we lost it. */
+  private async renewLeaseLoop(): Promise<void> {
+    if (!this.runActive || this.leaserValue === null || this.leaseCurrent === null) return;
+    try {
+      this.leaseCurrent = await this.leaserValue.renewLease(this.leaseCurrent);
+      this.leasePrimary = true;
+      this.scheduleLeaseRenewal();
+    } catch (err) {
+      if (err instanceof ErrLeaseNotHeld) {
+        this.logger.debug('lost lease; reverting to follower', err);
+        this.leasePrimary = false;
+        this.leaseCurrent = null;
+        this.stopLeaseRenewal();
+      } else {
+        // Transient error: retry shortly rather than letting the lease expire.
+        this.logger.error('lease renew error', err);
+        this.scheduleLeaseRenewal();
+      }
+    }
+  }
+
+  /** Cancels any pending lease renewal. */
+  private stopLeaseRenewal(): void {
+    if (this.leaseTimer !== null) {
+      clearTimeout(this.leaseTimer);
+      this.leaseTimer = null;
     }
   }
 

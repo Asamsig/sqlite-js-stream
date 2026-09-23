@@ -84,6 +84,7 @@ export class S3Leaser implements Leaser {
   readonly key: string;
   private client: S3ClientLike;
   private owner: string;
+  private ttlMs: number;
 
   constructor(opts: { bucket: string; prefix?: string; client: S3ClientLike; owner?: string; ttlMs?: number }) {
     if (!opts.bucket) throw new Error('S3 leaser: bucket is required');
@@ -92,6 +93,7 @@ export class S3Leaser implements Leaser {
     this.key = this.prefix ? `${this.prefix}/${DefaultLeasePath}` : DefaultLeasePath;
     this.client = opts.client;
     this.owner = opts.owner ?? `${process.pid}`;
+    this.ttlMs = opts.ttlMs ?? DefaultLeaseTTL;
   }
 
   async acquireLease(): Promise<Lease> {
@@ -103,7 +105,7 @@ export class S3Leaser implements Leaser {
     let generation = 1;
     if (existing !== null) generation = existing.generation + 1;
 
-    const lease = new Lease(generation, Date.now() + DefaultLeaseTTL, this.owner);
+    const lease = new Lease(generation, Date.now() + this.ttlMs, this.owner);
     const data = new TextEncoder().encode(
       JSON.stringify({
         generation: lease.generation,
@@ -135,7 +137,7 @@ export class S3Leaser implements Leaser {
 
   async renewLease(lease: Lease): Promise<Lease> {
     if (lease.etag == null) throw new ErrLeaseNotHeld();
-    const renewed = new Lease(lease.generation, Date.now() + DefaultLeaseTTL, lease.owner);
+    const renewed = new Lease(lease.generation, Date.now() + this.ttlMs, lease.owner);
     const data = new TextEncoder().encode(
       JSON.stringify({
         generation: renewed.generation,

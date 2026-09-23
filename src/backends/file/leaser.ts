@@ -61,9 +61,11 @@ async function readLease(lockPath: string): Promise<Lease | null> {
 /** FileLeaser implements {@link Leaser} for a local directory. */
 export class FileLeaser implements Leaser {
   private lockPath: string;
+  private ttlMs: number;
 
-  constructor(path: string, lockName = DefaultLeasePath) {
+  constructor(path: string, lockName = DefaultLeasePath, ttlMs = DefaultLeaseTTL) {
     this.lockPath = nodePath.join(path, lockName);
+    this.ttlMs = ttlMs;
   }
 
   async acquireLease(): Promise<Lease> {
@@ -75,7 +77,7 @@ export class FileLeaser implements Leaser {
     let generation = 1;
     if (existing !== null) generation = existing.generation + 1;
 
-    const lease = new Lease(generation, Date.now() + DefaultLeaseTTL, this.owner());
+    const lease = new Lease(generation, Date.now() + this.ttlMs, this.owner());
     const bytes = encodeLease(lease);
 
     if (existing === null) {
@@ -113,7 +115,7 @@ export class FileLeaser implements Leaser {
     if (current === null) throw new ErrLeaseNotHeld();
     if (current.etag !== lease.etag) throw new ErrLeaseNotHeld();
 
-    const renewed = new Lease(lease.generation, Date.now() + DefaultLeaseTTL, lease.owner);
+    const renewed = new Lease(lease.generation, Date.now() + this.ttlMs, lease.owner);
     const bytes = encodeLease(renewed);
     const tmp = `${this.lockPath}.tmp-${process.pid}-${Date.now()}`;
     await writeFile(tmp, bytes);

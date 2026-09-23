@@ -160,8 +160,9 @@ acquires/renews/releases a `lock.json` lease; `Replica.run()` uses it to choose 
   expired one — two racy acquirers cannot both win (one gets `412 PreconditionFailed`).
 - `renewLease` uses `If-Match: <etag>` and throws `ErrLeaseNotHeld` on mismatch (we lost it).
 - `releaseLease` deletes with `If-Match: <etag>`; missing object = already released.
-- A follower polls `acquireLease` each loop; the primary renews before expiry and reverts to follower
-  if the renew fails. On shutdown the primary releases the lease.
+- A follower polls `acquireLease` each loop; a **dedicated timer** renews the lease before expiry,
+  independent of the loop cadence, so a large `intervalMs` cannot let it expire. Losing the lease
+  reverts the node to follower. On shutdown the primary stops the timer and releases the lease.
 
 - **File backend** (`FileLeaser`): exclusive-create (`wx`) + content-hash etag — fine for
   local/single-host leases.

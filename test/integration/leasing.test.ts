@@ -129,6 +129,37 @@ describe('Replica.run() with a leaser (primary/follower)', () => {
     db.close();
     await rm(dir, { recursive: true, force: true });
   });
+
+  test('dedicated renewal timer keeps the lease alive with a large loop interval', async () => {
+    const dir = makeTempDir('lease-renew-');
+    const db = createWALDB(['a', 'b']);
+
+    // Short TTL but a run-loop interval far larger than the TTL: renewal must be
+    // handled by the dedicated timer, not the loop cadence.
+    const client = new FileReplicaClient(dir);
+    await client.init();
+    const leaser = new FileLeaser(dir, 'lock.json', 300);
+    const replica = new Replica(db.path, client);
+    replica.leaser = leaser;
+
+    const ac = new AbortController();
+    const runPromise = replica.run({ intervalMs: 5000, signal: ac.signal });
+    await waitFor(() => replica.isPrimary());
+
+    // Wait well past the 300ms TTL. If renewal were tied to the loop (5s), the
+    // lock would have expired. With the timer it stays current.
+    await new Promise((r) => setTimeout(r, 700));
+    const lock = JSON.parse(
+      await (await import('node:fs/promises')).readFile(nodePath.join(dir, 'lock.json'), 'utf8'),
+    ) as { expires_at: string };
+    assert.ok(Date.parse(lock.expires_at) > Date.now(), 'lease should have been renewed');
+    assert.ok(replica.isPrimary());
+
+    ac.abort();
+    await runPromise;
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
 });
 
 /** Polls `predicate` until true or the timeout (ms) elapses. */
