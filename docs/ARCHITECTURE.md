@@ -178,5 +178,10 @@ left off, even after a restart.
 - LZ4 uses `lz4js` (pure JS **block** format), which is interoperable for **decompression** but not
   byte-identical to Go's `pierrec/lz4/v4`. Files written here are readable by Litestream and
   vice-versa.
+- **Write format is modern LTX.** We write `superfly/ltx v0.5.2` LTX files with compaction levels
+  0..9 (snapshots at level 9) under `ltx/{level}/{min}-{max}.ltx`, exactly matching current
+  litestream. We deliberately do **not** read legacy v0.3.x generation backups
+  (`generations/…/snapshots|wal/*.lz4`); the LZ4 frame codec and generation-listing interfaces that
+  would be needed are intentionally omitted.
 - Cloud backends beyond S3, distributed leasing (`lock.json` conditional writes for multi-replica
   safety), VFS mirroring, and the IPC server are not yet implemented.

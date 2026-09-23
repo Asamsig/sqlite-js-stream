@@ -481,9 +481,19 @@ contiguous TXIDs; retention prunes old L0/snapshots; restore still correct after
 and WAL-resumption survive compaction + GC (incremental sync continues without reusing TXIDs).
 
 ✅ **Implemented (post-MVP hardening):** multi-level streaming compaction (L0→L1→L2→L3 via
-`StreamingCompactor`), snapshot + coverage-based retention/GC, and interval scheduling in
-`Replica.run()`/`Store.run()`. Restore now builds its plan across all compaction levels, preferring
-the highest level for a TXID range.
+`StreamingCompactor`), litestream-style compaction scheduling and retention, and interval scheduling
+in `Replica.run()`/`Store.run()`. Restore now builds its plan across all compaction levels,
+preferring the highest level for a TXID range.
+
+**Litestream-alignment (committed):** per-level **time-bucketed** compaction (`CompactionLevels`,
+`compactDB`/`compactSnapshot`, L1=30s/L2=5m/L3=1h defaults); time-based snapshot retention with an
+always-kept-newest guard; TXID-boundary cascade through levels; L0 **time retention** that never
+deletes the live-head L0 file. The legacy single-interval `compactionIntervalMs` path is preserved.
+
+**Deliberately out of scope:** legacy v0.3.x **generation** backup reads (`generations/…`). Our write
+format is already the modern `superfly/ltx v0.5.2` LTX (same as current litestream), and we do not
+wish to add the LZ4-frame codec + generation-listing interfaces needed to recover old v0.3.x
+backups.
 
 ### Milestone 6+ — Advanced / optional (NOT required for MVP)
 
