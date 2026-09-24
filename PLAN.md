@@ -42,6 +42,12 @@ Verified on Node `v24.21.0`.
 > writes **level-9 full snapshots** (`min=1`). `Restore` and `Store` use the `Compactor` to merge a
 > level-9 snapshot with subsequent level-0 files. See `test/integration/snapshot-store.test.ts`.
 
+> **Post-MVP hardening & features completed:** streaming for large DBs (`StreamLtxReader` /
+> `AsyncByteReader` / `FileSink`, S3 multipart ≥5 MiB), multi-level compaction + retention/GC
+> (L0→…→L9 with litestream-style time-bucketed scheduling), a **pnpm monorepo** with an **S3 addon**
+> (`packages/backend-s3`), distributed **leasing** (`lock.json` conditional writes), and **legacy
+> v0.3.x generation restore-read**. Test suite: **128 tests (110 core + 18 S3)**, green on Node 24 & 26.
+
 > **Interop note (Milestone 1):** Go's `superfly/ltx` golden file-checksum vectors
 > (`0xe27f4c18f0da2c10`, `0xd926967672f7ca53`) are pinned in `test/ltx/golden.test.ts`. Our `lz4js`
 > produces *valid* but not *byte-identical* LZ4 block bytes to Go's `pierrec/lz4/v4`, so our file
@@ -75,7 +81,7 @@ read pages/WAL via `fs.promises`, and use `node:sqlite` only for control + read 
 | `replica.go`                  | Replication mechanics: position tracking, sync to client, restore plan    | `src/replica.ts`               |
 | `store.go`                    | Multi-DB coordination, snapshot/compaction scheduling, retention          | `src/store.ts`                 |
 | `compactor.go`                | Merge LTX readers into one stream (used for compaction & restore)         | `src/ltx/compactor.ts`         |
-| `leaser.go`, `s3/leaser.go`   | Distributed lease (lock.json) — later phase                               | `src/leaser.ts` (later)        |
+| `leaser.go`, `s3/leaser.go`   | Distributed lease (lock.json) — ✅ implemented                            | `src/leaser.ts` + `src/backends/file/leaser.ts` + `packages/backend-s3/src/leaser.ts` |
 | `server.go`                   | Unix-socket IPC control server — out of scope for MVP                     | —                              |
 | `vfs.go`                      | Real-time SQLite VFS mirroring — out of scope for MVP                     | —                              |
 
@@ -191,7 +197,7 @@ persists by reading the highest local L0 LTX file (its header carries `WALOffset
 | Concern | Choice | Why |
 |---------|--------|-----|
 | SQLite | **`node:sqlite`** (`DatabaseSync`) | Built-in (Node 24), no native compile. Confirm WAL/PRAGMA/read-txn/checkpoint behavior in tests. |
-| LZ4 **block** codec | **`lz4-napi` (native) with `lz4js` (pure-JS) fallback** | LTX uses block format. Follow `@platformatic/kafka`'s native→JS fallback pattern (`crc32c.ts`). |
+| LZ4 codec | **`lz4js` (pure JS)** for LTX **block** format; plus a **frame** codec (`compressFrameLz4`/`decompressFrameLz4`, pure JS) for legacy v0.3.x restore-reads | LTX uses block format. `lz4js` **decompression** is Go-interoperable, but our compressed bytes are valid-yet-not-byte-identical to Go's `pierrec/lz4/v4`, so file checksums differ. The frame codec interoperates with Go `pierrec/lz4` frames. |
 | CRC-64 ISO | **Implement in TS** (`src/ltx/crc64.ts`) | No good npm pkg; table-based, test against Go vectors (`"123456789"` ⇒ `b90956c775a41001`). |
 | Binary buffer accumulation | `@platformatic/dynamic-buffer` *(optional)* | Nice for streaming WAL/page/index; not required for MVP (plain `Buffer` is fine). |
 | Test runner | **`node:test`** + `node:assert/strict` in `.test.ts` | Built-in, runs `.ts` directly via type stripping. |
@@ -253,43 +259,54 @@ sqlite-js-stream/
   PLAN.md
   README.md
   src/
-    index.ts                 # public entry: Litestream, DB, Replica, ReplicaClient, helpers
-    types.ts                 # TXID, Checksum, Pos, SyncStatus, Config types
-    db.ts                    # DB class
-    replica.ts               # Replica class
+    index.ts                 # public entry: VERSION, Replica, Store, ReplicaClient, helpers,
+                             #   LTX/WAL module re-exports, leasers, logger
+    replica.ts               # Replica class (driver-agnostic: takes a path + client)
     store.ts                 # Store class (multi-DB, scheduling)
-    replica-client.ts        # ReplicaClient interface + Fetch helpers
-    config.ts                # config parsing / replica URL
+    replica-client.ts        # ReplicaClient interface + ltxDir/ltxFilePath/fetch* helpers
+    replica-url.ts           # parseReplicaURLWithQuery + registerReplicaClientFactory +
+                             #   newReplicaClientFromURL (scheme registry)
+    db.ts                    # internal: node:sqlite snapshot pinning (NOT exported)
+    leaser.ts                # Leaser interface
+    restore-v3.ts            # legacy v0.3.x generation restore-read (GenerationClientV3)
     ltx/
-      index.ts
+      index.ts               # re-exports the LTX module
       crc64.ts               # CRC-64 ISO (table-based, reflected, init/xorout all-ones)
       checksum.ts            # ChecksumPage, rolling checksum, ChecksumReader
-      constants.ts           # Magic, sizes, flags, LockPgno, filename regex
+      constants.ts           # Magic, sizes, flags, LockPgno, SnapshotLevel, filename regex
       types.ts               # Header, PageHeader, PageIndexElem, Trailer, FileInfo, Pos
       header.ts              # Header marshal/unmarshal/validate
       page.ts                # PageHeader marshal/unmarshal
       page-index.ts          # varint encode/decode, DecodePageIndex/EncodePageIndex
       trailer.ts             # Trailer marshal/unmarshal/validate
       filename.ts            # FormatFilename / ParseFilename / ParseTXID / ParseChecksum
-      lz4.ts                 # LZ4 block adapter (native → js fallback)
+      lz4.ts                 # LZ4 block adapter (lz4js) + LZ4 frame codec (v0.3 compat)
       encoder.ts             # Encoder: header, page, index, trailer, file checksum
       decoder.ts             # Decoder: header, page, index, trailer, DecodeDatabaseTo
-      compactor.ts           # Compactor: merge readers
+      compactor.ts           # in-memory Compactor: merge readers
+      streaming-compactor.ts # page-by-page bounded-memory compactor (multi-level)
+      stream.ts              # StreamLtxReader / AsyncByteReader / FileSink
       file-info.ts           # FileInfo, FileIterator, FileInfoSliceIterator
+      compaction-level.ts    # CompactionLevels, defaultCompactionLevels, bucket helpers
+      byte-reader.ts         # ByteReader helpers
+      bytes.ts               # byte-vector read/write helpers
+      sink.ts                # output sink for encoded LTX
     wal/
-      index.ts
+      index.ts               # re-exports the WAL module
       reader.ts              # WALReader: header/frames/checksum/pageMap, with-offset
       checksum.ts            # WALChecksum
+      constants.ts           # WAL magic / salts / version constants
     backends/
       file/
-        index.ts
-        replica-client.ts    # FileReplicaClient
-      s3/                    # later
+        index.ts             # re-exports the file backend
+        replica-client.ts    # FileReplicaClient (+ GenerationClientV3)
+        leaser.ts            # FileLeaser
     util/
-      atomic-file.ts         # write-to-temp + rename + fsync
-      limit-read-closer.ts   # partial reads
-      resumable-reader.ts    # resumable stream reads (later)
-      sqlite.ts              # node:sqlite helpers (open w/ WAL, page size, read txn)
+      fs.ts                  # write-to-temp + rename + fsync, mkdir, rm
+      stream.ts              # stream plumbing / AsyncByteReader / FileSink
+      logger.ts              # Logger interface + noopLogger
+  packages/
+    backend-s3/              # monorepo addon: S3ReplicaClient + S3Leaser (+ scheme registry)
   test/
     helpers/
       make-db.ts             # create a WAL db with known rows via node:sqlite
@@ -309,46 +326,64 @@ sqlite-js-stream/
 
 ## 5. Public API we expose (MVP)
 
+The library is **driver-agnostic.** `Replica`/`Store` take a database **path** and read the DB file
++ `-wal` directly from disk, so the application can use any SQLite driver (or none).
+`DB`/`Database`/`openDatabase`/`Litestream`/`Config` are intentionally **not** exported;
+`node:sqlite` is used internally only to pin a read-only snapshot.
+
 ```ts
-import { Litestream, DB, Replica, ReplicaClient, FileReplicaClient, Config } from '...'
+import {
+  Replica, Store, FileReplicaClient, FileLeaser,
+  newReplicaClientFromURL, registerReplicaClientFactory,
+  ReplicaClient, CompactionLevels, defaultCompactionLevels, calcRestorePlan,
+  restoreV3, GenerationClientV3, compressFrameLz4, decompressFrameLz4,
+  VERSION,
+} from 'sqlite-js-stream'
 
-type Config = {
-  dbs: Array<{
-    path: string
-    replicas: Array<{ url: string }>         // 'file:///data/repl'
-  }>
-  snapshotInterval?: number
-  snapshotRetention?: number
-  l0Retention?: number
-}
+// File-backed replica: `path` is the SQLite DB; the client is a storage backend.
+const client = new FileReplicaClient('/data/repl')
+const replica = new Replica('/data/app.db', client)   // reads app.db + app.db-wal directly
 
-const ls = new Litestream(config)
-await ls.open()                              // opens all DBs, starts monitors
+await replica.sync()                        // WAL → LTX, uploads via client
+await replica.snapshot()                    // full level-9 snapshot
+const status = await replica.syncStatus()   // { localTXID, remoteTXID, inSync }
+await replica.syncAndWait()
+await replica.ensureExists()                // restore local DB if missing, before open
+await replica.run({ intervalMs: 5000, signal })   // continuous sync (primary/follower w/ leaser)
+await replica.compact()                     // litestream-style per-level compaction schedule
+await replica.enforceRetention()            // time-based snapshot + L0 retention / GC
 
-const db = ls.getDB('/data/app.db')          // or DB.open(path)
-await db.sync()                               // WAL → LTX, uploads via ReplicaClient
-const status = await db.syncStatus()          // { localTXID, remoteTXID, inSync }
-await db.syncAndWait()
-await db.ensureExists()                       // restore local DB if missing, before open
+await replica.restore({ outputPath: '/data/restored.db', timestamp })  // snapshot + L0 overlay
+replica.close()
 
-const replica = db.replica                    // Replica
-await replica.restore({ outputPath: '/data/restored.db' })  // apply snapshot + L0
-await db.close()
+// Multi-DB coordination
+const store = new Store()
+await store.openDB('/data/app.db', client)
+await store.run({ intervalMs })             // syncAll + snapshotAll + compactAll + retention
+store.close()
+
+// URL-based factory + addon scheme registry
+registerReplicaClientFactory('s3', s3Factory)   // S3 addon auto-registers 's3' on import
+const c = newReplicaClientFromURL('s3://bucket/prefix')
 ```
 
 `ReplicaClient` interface (port of `replica_client.go`):
 ```ts
 interface ReplicaClient {
   type(): string
-  init(ctx: AbortSignal): Promise<void>
-  ltxFiles(opts: { level: number; seek: bigint; useMetadata: boolean }): AsyncIterable<FileInfo>
-  openLtxFile(opts: { level: number; minTXID: bigint; maxTXID: bigint; offset: bigint; size: bigint }): Promise<Readable>
-  writeLtxFile(opts: { level: number; minTXID: bigint; maxTXID: bigint }, body: Readable): Promise<FileInfo>
+  init(): Promise<void>
+  ltxFiles(opts: { level: number; seek: TXID; useMetadata: boolean }): AsyncIterable<FileInfo>
+  openLtxFile(opts: { level: number; minTXID: TXID; maxTXID: TXID; offset: number; size: number }): Promise<Readable>
+  writeLtxFile(opts: { level: number; minTXID: TXID; maxTXID: TXID }, body: AsyncIterable<Uint8Array | string>): Promise<FileInfo>
   deleteLtxFiles(infos: FileInfo[]): Promise<void>
   deleteAll(): Promise<void>
   setLogger(l: Logger): void
 }
 ```
+
+A backend may additionally implement `GenerationClientV3` to enable legacy v0.3.x restore-reads
+(`restoreV3`). The **S3 backend is a monorepo addon** (`@platformatic/sqlite-js-stream-backend-s3`)
+registered via `registerReplicaClientFactory('s3', …)` on import.
 
 ---
 
@@ -393,7 +428,8 @@ Implement and unit-test, in order:
    `TXID`/`Checksum` string/JSON formats.
 4. **`header.ts` / `page.ts` / `trailer.ts`** — marshalling/unmarshalling + `Validate()`.
 5. **`page-index.ts`** — varint encode/decode; `EncodePageIndex`/`DecodePageIndex`.
-6. **`lz4.ts`** — block codec adapter (`lz4-napi`→`lz4js`, both expose block functions).
+6. **`lz4.ts`** — LZ4 codec (`lz4js` pure JS): LTX **block** adapter + a **frame** codec for
+   legacy v0.3.x restore-reads.
 7. **`encoder.ts`** — `EncodeHeader`, `EncodePage` (compress + size prefix), `EncodePageIndex`,
    `Close` (compute file checksum). Support `HeaderFlagNoChecksum`.
 8. **`decoder.ts`** — `DecodeHeader`, `DecodePage`, `DecodePageIndex`, `Close` (verify file
@@ -501,21 +537,28 @@ snapshot + WAL produce the live database.
 
 ### Milestone 6+ — Advanced / optional (NOT required for MVP)
 
-- **Cloud backends:** `s3/`, `gs/`, `abs/`, `sftp/`, `nats/` replica clients + their leaser
-  (`lock.json` conditional writes).
+- **S3 backend** — ✅ **implemented** as a monorepo addon `packages/backend-s3`:
+  `S3ReplicaClient` (multipart upload ≥5 MiB, `If-None-Match`/`If-Match` conditional writes,
+  `GenerationClientV3` reads) + `S3Leaser`. Importing it registers the `s3` scheme so
+  `newReplicaClientFromURL('s3://bucket/prefix')` resolves.
+- **More cloud backends** — *not yet built*: `gs/`, `abs/`, `sftp/`, `nats/`. Each is a new addon
+  package following the `packages/backend-s3` pattern (implement `ReplicaClient` + optional
+  `Leaser`, register the URL scheme on import).
 - **Distributed leasing** — ✅ **implemented** (`src/leaser.ts` + file/S3 leasers): a `Leaser`
   acquires/renews/releases a `lock.json` lease; `Replica.run()` becomes a **primary** (writes) or a
   **follower** (polls), gating all storage-write methods on lease ownership. File backend uses
   exclusive-create + content-hash etag; S3 uses `If-None-Match`/`If-Match` conditional writes.
+- **Legacy v0.3.x generation restore-read** — ✅ **implemented** (see milestone 5 note).
 - **VFS real-time mirroring** (`vfs.go` port — hook into SQLite VFS; likely deferred).
 - **IPC Unix-socket control server** (`server.go`).
-- **`litestream ltx`/CLI wrapper** only if a CLI is desired.
+- **CLI** (`litestream replicate/restore/ltx/reset/snapshots`) + YAML config — *not built*; library
+  only for now.
 
 ---
 
 ## 8. Known risks & open questions
 
-1. **`node:sqlite` concurrency semantics.** Whether a long-running read txn on one
+1. **`node:sqlite` concurrency semantics.** ✅ **resolved** (verified in `test/integration/checkpoint-concurrency.test.ts`). Whether a long-running read txn on one
    `DatabaseSync` genuinely blocks WAL truncation while a **separate** connection runs
    `wal_checkpoint`, and whether `PRAGMA wal_autocheckpoint` must be raised (litestream disables
    SQLite's auto-checkpoint so it can control checkpoints). Must be verified in Milestone 4 with
@@ -526,16 +569,18 @@ snapshot + WAL produce the live database.
 2. **Golden interoperability.** Go is not installed in the dev environment. We hand-derive fixtures
    and add a Go golden generator for CI. Until goldens are committed, interop is validated by
    round-trip + spec conformance only.
-3. **LZ4 block vs frame.** LTX requires **block** format; `@platformatic/wasm-utils` is frame-only.
-   `lz4-napi` (block) and `lz4js` (block) both verified. Prefer `lz4-napi` for perf with `lz4js`
-   fallback, but ensure the fallback path is tested for identical decode results.
-4. **CRC-64 ISO vs ECMA.** **ISO must be used** (mismatch = broken interop). Provide a direct vector
+3. **LZ4 block vs frame.** ✅ **both supported.** LTX uses **block** format; a pure-JS **frame**
+   codec (`compressFrameLz4`/`decompressFrameLz4`) was added for legacy v0.3.x restore-reads.
+   We use pure-JS `lz4js` for both block and frame. `lz4js` **decodes** Go-produced bytes
+   correctly, so decompression interop is guaranteed; only byte-identical *encoding* would require
+   a liblz4-compatible codec (`lz4-napi`/WASM), which is an optional future upgrade.
+4. **CRC-64 ISO vs ECMA.** ✅ **resolved** – **ISO is used** (mismatch = broken interop). Provide a direct vector
    test to lock this in.
-5. **TXID/position persistence.** Position is derived from local L0 LTX headers (no separate pos
+5. **TXID/position persistence.** ✅ **resolved** – position is derived from local L0 LTX headers (no separate pos
    file). Ensure we reconstruct `WALOffset`/salts on restart exactly.
 6. **Type stripping limits.** No `enum`/decorators/parameter properties; use `import type`; explicit
    `.ts` extensions. Add a lint guard (eslint rule or tsconfig) to prevent violations.
-7. **Memory/perf on large DBs.** ✅ **Streaming implemented (post-MVP).** `restore()` streams each
+7. **Memory/perf on large DBs.** ✅ **resolved** – **streaming implemented (post-MVP).** `restore()` streams each
    LTX file page-by-page into the output DB (snapshot base + incremental overlay) and
    `sync()`/`snapshot()` read pages from a file handle and stream the encoded LTX straight to disk
    (`FileSink`); the S3 addon uses multipart upload for objects > 5 MiB. Peak memory is bounded by
@@ -551,11 +596,11 @@ snapshot + WAL produce the live database.
 
 ## 9. Out of scope for MVP (documented, deferred)
 
-- Cloud object-store backends (S3/GCS/Azure/SFTP/NATS).
-- Distributed leasing / lock.json.
+- Cloud object-store backends — **S3 done** (addon `packages/backend-s3`); GCS/Azure/SFTP/NATS deferred.
+- Distributed leasing / lock.json — **done** (`src/leaser.ts` + file/S3 leasers).
 - VFS real-time mirroring.
 - Unix-socket IPC server.
-- Full CLI (`litestream replicate`, `restore`, `ltx`, `reset`, `snapshots`).
+- CLI (`litestream replicate`, `restore`, `ltx`, `reset`, `snapshots`) + YAML config.
 - Metrics/telemetry (Prometheus) and rich diagnostics.
 - `--txid`/timestamp point-in-time restore edge cases and `follow` mode.
 
@@ -572,7 +617,7 @@ snapshot + WAL produce the live database.
 | `db.go` | `src/db.ts` |
 | `replica.go` | `src/replica.ts` |
 | `store.go`, `compactor.go` | `src/store.ts`, `src/ltx/compactor.ts` |
-| `leaser.go`, `s3/leaser.go` | `src/leaser.ts` (later) |
+| `leaser.go`, `s3/leaser.go` | `src/leaser.ts` + `src/backends/file/leaser.ts` + `packages/backend-s3/src/leaser.ts` |
 | `vfs.go` | deferred |
 | `server.go` | deferred |
 
@@ -580,13 +625,13 @@ snapshot + WAL produce the live database.
 
 ## 11. Definition of done for MVP (Milestones 0–4)
 
-- [ ] `npm test` green; `tsc --noEmit` clean.
-- [ ] LTX encoder/decoder pass round-trip + golden + checksum-verification tests.
-- [ ] WAL reader parses real `node:sqlite` WAL files, `pageMap` correct.
-- [ ] `FileReplicaClient` writes/reads/deletes in the correct directory layout.
-- [ ] End-to-end test: SQLite DB → `sync()` → `file://` replica → `restore()` → valid DB.
-- [ ] `syncStatus`/`syncAndWait`/`ensureExists` work.
-- [ ] No checkpoint truncates WAL before we've synced it.
+- [x] `npm test` green (128 tests: 110 core + 18 S3); `tsc --noEmit` clean.
+- [x] LTX encoder/decoder pass round-trip + golden + checksum-verification tests.
+- [x] WAL reader parses real `node:sqlite` WAL files, `pageMap` correct.
+- [x] `FileReplicaClient` writes/reads/deletes in the correct directory layout.
+- [x] End-to-end test: SQLite DB → `sync()` → `file://` replica → `restore()` → valid DB.
+- [x] `syncStatus`/`syncAndWait`/`ensureExists` work.
+- [x] No checkpoint truncates WAL before we've synced it.
 
 ---
 
