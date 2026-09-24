@@ -45,8 +45,8 @@ Verified on Node `v24.21.0`.
 > **Post-MVP hardening & features completed:** streaming for large DBs (`StreamLtxReader` /
 > `AsyncByteReader` / `FileSink`, S3 multipart ≥5 MiB), multi-level compaction + retention/GC
 > (L0→…→L9 with litestream-style time-bucketed scheduling), a **pnpm monorepo** with an **S3 addon**
-> (`packages/backend-s3`), distributed **leasing** (`lock.json` conditional writes), and **legacy
-> v0.3.x generation restore-read**. Test suite: **128 tests (110 core + 18 S3)**, green on Node 24 & 26.
+> (`packages/backend-s3`), distributed **leasing** (`lock.json` conditional writes). Test suite:
+> **121 tests (103 core + 18 S3)**, green on Node 24 & 26.
 
 > **Interop note (Milestone 1):** Go's `superfly/ltx` golden file-checksum vectors
 > (`0xe27f4c18f0da2c10`, `0xd926967672f7ca53`) are pinned in `test/ltx/golden.test.ts`. Our `lz4js`
@@ -197,7 +197,7 @@ persists by reading the highest local L0 LTX file (its header carries `WALOffset
 | Concern | Choice | Why |
 |---------|--------|-----|
 | SQLite | **`node:sqlite`** (`DatabaseSync`) | Built-in (Node 24), no native compile. Confirm WAL/PRAGMA/read-txn/checkpoint behavior in tests. |
-| LZ4 codec | **`lz4js` (pure JS)** for LTX **block** format; plus a **frame** codec (`compressFrameLz4`/`decompressFrameLz4`, pure JS) for legacy v0.3.x restore-reads | LTX uses block format. `lz4js` **decompression** is Go-interoperable, but our compressed bytes are valid-yet-not-byte-identical to Go's `pierrec/lz4/v4`, so file checksums differ. The frame codec interoperates with Go `pierrec/lz4` frames. |
+| LZ4 codec | **`lz4js` (pure JS)**, LTX **block** format only | LTX uses block format. `lz4js` **decompression** is Go-interoperable, but our compressed bytes are valid-yet-not-byte-identical to Go's `pierrec/lz4/v4`, so file checksums differ. |
 | CRC-64 ISO | **Implement in TS** (`src/ltx/crc64.ts`) | No good npm pkg; table-based, test against Go vectors (`"123456789"` ⇒ `b90956c775a41001`). |
 | Binary buffer accumulation | `@platformatic/dynamic-buffer` *(optional)* | Nice for streaming WAL/page/index; not required for MVP (plain `Buffer` is fine). |
 | Test runner | **`node:test`** + `node:assert/strict` in `.test.ts` | Built-in, runs `.ts` directly via type stripping. |
@@ -268,7 +268,6 @@ sqlite-js-stream/
                              #   newReplicaClientFromURL (scheme registry)
     db.ts                    # internal: node:sqlite snapshot pinning (NOT exported)
     leaser.ts                # Leaser interface
-    restore-v3.ts            # legacy v0.3.x generation restore-read (GenerationClientV3)
     ltx/
       index.ts               # re-exports the LTX module
       crc64.ts               # CRC-64 ISO (table-based, reflected, init/xorout all-ones)
@@ -280,7 +279,7 @@ sqlite-js-stream/
       page-index.ts          # varint encode/decode, DecodePageIndex/EncodePageIndex
       trailer.ts             # Trailer marshal/unmarshal/validate
       filename.ts            # FormatFilename / ParseFilename / ParseTXID / ParseChecksum
-      lz4.ts                 # LZ4 block adapter (lz4js) + LZ4 frame codec (v0.3 compat)
+      lz4.ts                 # LZ4 block adapter (lz4js)
       encoder.ts             # Encoder: header, page, index, trailer, file checksum
       decoder.ts             # Decoder: header, page, index, trailer, DecodeDatabaseTo
       compactor.ts           # in-memory Compactor: merge readers
@@ -299,7 +298,7 @@ sqlite-js-stream/
     backends/
       file/
         index.ts             # re-exports the file backend
-        replica-client.ts    # FileReplicaClient (+ GenerationClientV3)
+        replica-client.ts    # FileReplicaClient
         leaser.ts            # FileLeaser
     util/
       fs.ts                  # write-to-temp + rename + fsync, mkdir, rm
@@ -336,7 +335,6 @@ import {
   Replica, Store, FileReplicaClient, FileLeaser,
   newReplicaClientFromURL, registerReplicaClientFactory,
   ReplicaClient, CompactionLevels, defaultCompactionLevels, calcRestorePlan,
-  restoreV3, GenerationClientV3, compressFrameLz4, decompressFrameLz4,
   VERSION,
 } from 'sqlite-js-stream'
 
@@ -381,8 +379,7 @@ interface ReplicaClient {
 }
 ```
 
-A backend may additionally implement `GenerationClientV3` to enable legacy v0.3.x restore-reads
-(`restoreV3`). The **S3 backend is a monorepo addon** (`@platformatic/sqlite-js-stream-backend-s3`)
+The **S3 backend is a monorepo addon** (`@platformatic/sqlite-js-stream-backend-s3`)
 registered via `registerReplicaClientFactory('s3', …)` on import.
 
 ---
@@ -428,8 +425,7 @@ Implement and unit-test, in order:
    `TXID`/`Checksum` string/JSON formats.
 4. **`header.ts` / `page.ts` / `trailer.ts`** — marshalling/unmarshalling + `Validate()`.
 5. **`page-index.ts`** — varint encode/decode; `EncodePageIndex`/`DecodePageIndex`.
-6. **`lz4.ts`** — LZ4 codec (`lz4js` pure JS): LTX **block** adapter + a **frame** codec for
-   legacy v0.3.x restore-reads.
+6. **`lz4.ts`** — LZ4 **block** codec adapter (`lz4js`).
 7. **`encoder.ts`** — `EncodeHeader`, `EncodePage` (compress + size prefix), `EncodePageIndex`,
    `Close` (compute file checksum). Support `HeaderFlagNoChecksum`.
 8. **`decoder.ts`** — `DecodeHeader`, `DecodePage`, `DecodePageIndex`, `Close` (verify file
@@ -526,20 +522,15 @@ preferring the highest level for a TXID range.
 always-kept-newest guard; TXID-boundary cascade through levels; L0 **time retention** that never
 deletes the live-head L0 file. The legacy single-interval `compactionIntervalMs` path is preserved.
 
-**Legacy v0.3.x generation backup reads** — ✅ **implemented** (`src/restore-v3.ts` + LZ4-frame
-codec). Our write format is already the modern `superfly/ltx v0.5.2` LTX (same as current
-litestream); the only *format* capability modern litestream has that we now also support is **reading
-old v0.3.x generation backups**. `Replica.restore()` falls back to `restoreV3()` when a client
-implements `GenerationClientV3` (file backend does) and there are no LTX files. It reconstructs a
-database from `generations/{gen}/snapshots/{index}.snapshot.lz4` + `wal/{index}_{offset}.wal.lz4`
-(frame-decoded with `lz4js`), replaying WAL segments per index and checkpointing (TRUNCATE) so the
-snapshot + WAL produce the live database.
+**Deliberately out of scope:** legacy v0.3.x **generation** backup reads (`generations/…`). Our write
+format is already the modern `superfly/ltx v0.5.2` LTX (same as current litestream), and we do not
+wish to add the LZ4-frame codec + generation-listing interfaces needed to recover old v0.3.x
+backups.
 
 ### Milestone 6+ — Advanced / optional (NOT required for MVP)
 
 - **S3 backend** — ✅ **implemented** as a monorepo addon `packages/backend-s3`:
-  `S3ReplicaClient` (multipart upload ≥5 MiB, `If-None-Match`/`If-Match` conditional writes,
-  `GenerationClientV3` reads) + `S3Leaser`. Importing it registers the `s3` scheme so
+  `S3ReplicaClient` (multipart upload ≥5 MiB, `If-None-Match`/`If-Match` conditional writes) + `S3Leaser`. Importing it registers the `s3` scheme so
   `newReplicaClientFromURL('s3://bucket/prefix')` resolves.
 - **More cloud backends** — *not yet built*: `gs/`, `abs/`, `sftp/`, `nats/`. Each is a new addon
   package following the `packages/backend-s3` pattern (implement `ReplicaClient` + optional
@@ -548,7 +539,6 @@ snapshot + WAL produce the live database.
   acquires/renews/releases a `lock.json` lease; `Replica.run()` becomes a **primary** (writes) or a
   **follower** (polls), gating all storage-write methods on lease ownership. File backend uses
   exclusive-create + content-hash etag; S3 uses `If-None-Match`/`If-Match` conditional writes.
-- **Legacy v0.3.x generation restore-read** — ✅ **implemented** (see milestone 5 note).
 - **VFS real-time mirroring** (`vfs.go` port — hook into SQLite VFS; likely deferred).
 - **IPC Unix-socket control server** (`server.go`).
 - **CLI** (`litestream replicate/restore/ltx/reset/snapshots`) + YAML config — *not built*; library
@@ -569,11 +559,10 @@ snapshot + WAL produce the live database.
 2. **Golden interoperability.** Go is not installed in the dev environment. We hand-derive fixtures
    and add a Go golden generator for CI. Until goldens are committed, interop is validated by
    round-trip + spec conformance only.
-3. **LZ4 block vs frame.** ✅ **both supported.** LTX uses **block** format; a pure-JS **frame**
-   codec (`compressFrameLz4`/`decompressFrameLz4`) was added for legacy v0.3.x restore-reads.
-   We use pure-JS `lz4js` for both block and frame. `lz4js` **decodes** Go-produced bytes
-   correctly, so decompression interop is guaranteed; only byte-identical *encoding* would require
-   a liblz4-compatible codec (`lz4-napi`/WASM), which is an optional future upgrade.
+3. **LZ4 block format.** ✅ **resolved** — we use pure-JS `lz4js` (block format). `lz4js`
+   **decodes** Go-produced bytes correctly, so decompression interop is guaranteed; only
+   byte-identical *encoding* would require a liblz4-compatible codec (`lz4-napi`/WASM), which is an
+   optional future upgrade.
 4. **CRC-64 ISO vs ECMA.** ✅ **resolved** – **ISO is used** (mismatch = broken interop). Provide a direct vector
    test to lock this in.
 5. **TXID/position persistence.** ✅ **resolved** – position is derived from local L0 LTX headers (no separate pos

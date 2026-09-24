@@ -8,7 +8,7 @@
  */
 
 import { createReadStream } from 'node:fs';
-import { open, readdir, readFile, rename, rm, stat, utimes, type FileHandle } from 'node:fs/promises';
+import { open, readdir, rename, rm, stat, utimes, type FileHandle } from 'node:fs/promises';
 import nodePath from 'node:path';
 import { Readable } from 'node:stream';
 
@@ -23,16 +23,6 @@ import {
 } from '../../replica-client.ts';
 import type { FileInfo, Header } from '../../ltx/index.ts';
 import { HeaderSize, unmarshalHeader } from '../../ltx/index.ts';
-import {
-  formatSnapshotFilenameV3,
-  formatWALSegmentFilenameV3,
-  isGenerationIDV3,
-  parseSnapshotFilenameV3,
-  parseWALSegmentFilenameV3,
-  type GenerationClientV3,
-  type SnapshotInfoV3,
-  type WALSegmentInfoV3,
-} from '../../restore-v3.ts';
 import { concatBytes } from '../../util/stream.ts';
 import { fsyncDir, mkdirAll } from '../../util/fs.ts';
 import type { Logger } from '../../util/logger.ts';
@@ -42,106 +32,12 @@ import { registerReplicaClientFactory } from '../../replica-url.ts';
 export const ReplicaClientType = 'file';
 
 /** FileReplicaClient writes LTX files to a local directory. */
-export class FileReplicaClient implements ReplicaClient, GenerationClientV3 {
+export class FileReplicaClient implements ReplicaClient {
   private pathVal: string;
   private logger: Logger = noopLogger;
 
   constructor(path: string) {
     this.pathVal = path;
-  }
-
-  /** GenerationsV3 returns legacy v0.3.x generation IDs in ascending order. */
-  async generations(): Promise<string[]> {
-    const dir = nodePath.join(this.pathVal, 'generations');
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw err;
-    }
-    return entries
-      .filter((e) => e.isDirectory() && isGenerationIDV3(e.name))
-      .map((e) => e.name)
-      .sort();
-  }
-
-  /** SnapshotsV3 returns v0.3.x snapshots for a generation, sorted by index. */
-  async snapshotsV3(generation: string): Promise<SnapshotInfoV3[]> {
-    const dir = nodePath.join(this.pathVal, 'generations', generation, 'snapshots');
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw err;
-    }
-    const out: SnapshotInfoV3[] = [];
-    for (const e of entries) {
-      if (!e.isFile()) continue;
-      let index: number;
-      try {
-        index = parseSnapshotFilenameV3(e.name);
-      } catch {
-        continue;
-      }
-      const st = await stat(nodePath.join(dir, e.name));
-      out.push({ generation, index, size: st.size, createdAt: st.mtimeMs });
-    }
-    out.sort((a, b) => a.index - b.index);
-    return out;
-  }
-
-  /** WALSegmentsV3 returns v0.3.x WAL segments, sorted by (index, offset). */
-  async walSegmentsV3(generation: string): Promise<WALSegmentInfoV3[]> {
-    const dir = nodePath.join(this.pathVal, 'generations', generation, 'wal');
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw err;
-    }
-    const out: WALSegmentInfoV3[] = [];
-    for (const e of entries) {
-      if (!e.isFile()) continue;
-      let index: number, offset: number;
-      try {
-        ({ index, offset } = parseWALSegmentFilenameV3(e.name));
-      } catch {
-        continue;
-      }
-      const st = await stat(nodePath.join(dir, e.name));
-      out.push({ generation, index, offset, size: st.size, createdAt: st.mtimeMs });
-    }
-    out.sort((a, b) => a.index - b.index || a.offset - b.offset);
-    return out;
-  }
-
-  /** Reads the raw (compressed) bytes of a v0.3.x snapshot. */
-  async readSnapshotV3(generation: string, index: number): Promise<Uint8Array> {
-    return readFile(
-      nodePath.join(
-        this.pathVal,
-        'generations',
-        generation,
-        'snapshots',
-        formatSnapshotFilenameV3(index),
-      ),
-    );
-  }
-
-  /** Reads the raw (compressed) bytes of a v0.3.x WAL segment. */
-  async readWALSegmentV3(generation: string, index: number, offset: number): Promise<Uint8Array> {
-    return readFile(
-      nodePath.join(
-        this.pathVal,
-        'generations',
-        generation,
-        'wal',
-        formatWALSegmentFilenameV3(index, offset),
-      ),
-    );
   }
 
   type(): string {
