@@ -24,4 +24,9 @@ export * from './compaction-level.ts';
 
 // LZ4 block codec is internal (not part of the public LTX surface) but
 // exposed for the WAL/DB layers.
-export { compressBlock, decompressBlock } from './lz4.ts';
+export {
+  compressBlock,
+  decompressBlock,
+  compressFrameLz4,
+  decompressFrameLz4,
+} from './lz4.ts';

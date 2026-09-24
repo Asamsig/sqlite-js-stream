@@ -490,10 +490,14 @@ preferring the highest level for a TXID range.
 always-kept-newest guard; TXID-boundary cascade through levels; L0 **time retention** that never
 deletes the live-head L0 file. The legacy single-interval `compactionIntervalMs` path is preserved.
 
-**Deliberately out of scope:** legacy v0.3.x **generation** backup reads (`generations/…`). Our write
-format is already the modern `superfly/ltx v0.5.2` LTX (same as current litestream), and we do not
-wish to add the LZ4-frame codec + generation-listing interfaces needed to recover old v0.3.x
-backups.
+**Legacy v0.3.x generation backup reads** — ✅ **implemented** (`src/restore-v3.ts` + LZ4-frame
+codec). Our write format is already the modern `superfly/ltx v0.5.2` LTX (same as current
+litestream); the only *format* capability modern litestream has that we now also support is **reading
+old v0.3.x generation backups**. `Replica.restore()` falls back to `restoreV3()` when a client
+implements `GenerationClientV3` (file backend does) and there are no LTX files. It reconstructs a
+database from `generations/{gen}/snapshots/{index}.snapshot.lz4` + `wal/{index}_{offset}.wal.lz4`
+(frame-decoded with `lz4js`), replaying WAL segments per index and checkpointing (TRUNCATE) so the
+snapshot + WAL produce the live database.
 
 ### Milestone 6+ — Advanced / optional (NOT required for MVP)
 

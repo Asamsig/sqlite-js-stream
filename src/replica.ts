@@ -36,6 +36,7 @@ import {
 import { LocalDatabase } from './db.ts';
 import type { ReplicaClient } from './replica-client.ts';
 import { SnapshotLevel } from './replica-client.ts';
+import { restoreV3, type GenerationClientV3 } from './restore-v3.ts';
 import {
   DefaultLeaseRenewalBuffer,
   ErrLeaseNotHeld,
@@ -569,8 +570,22 @@ export class Replica {
   async restore(opt: RestoreOptions): Promise<void> {
     if (!opt.outputPath) throw new Error('output path required');
 
-    const plan = await calcRestorePlan(this.client, opt.txID ?? 0n);
-    if (plan.length === 0) throw new Error('no matching backup files available');
+    // A replica may contain no LTX files (e.g. it only holds legacy v0.3.x
+    // generation backups). calcRestorePlan throws in that case; catch it so we
+    // can fall back to reading the v0.3.x generations.
+    let plan: FileInfo[];
+    try {
+      plan = await calcRestorePlan(this.client, opt.txID ?? 0n);
+    } catch {
+      plan = [];
+    }
+    if (plan.length === 0) {
+      if (opt.txID === undefined && isGenerationClientV3(this.client)) {
+        await restoreV3(this.client as unknown as GenerationClientV3, opt.outputPath, opt.timestamp);
+        return;
+      }
+      throw new Error('no matching backup files available');
+    }
 
     await mkdir(nodePath.dirname(opt.outputPath), { recursive: true });
     const tmp = `${opt.outputPath}.tmp`;
@@ -1106,4 +1121,16 @@ async function writeAllAt(
     );
     offset += bytesWritten;
   }
+}
+
+/** Returns true if `client` implements the legacy v0.3.x generation read API. */
+function isGenerationClientV3(client: ReplicaClient): boolean {
+  const c = client as unknown as Record<string, unknown>;
+  return (
+    typeof c.generations === 'function' &&
+    typeof c.snapshotsV3 === 'function' &&
+    typeof c.walSegmentsV3 === 'function' &&
+    typeof c.readSnapshotV3 === 'function' &&
+    typeof c.readWALSegmentV3 === 'function'
+  );
 }

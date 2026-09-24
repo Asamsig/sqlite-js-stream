@@ -246,9 +246,12 @@ expires.
   vice-versa.
 - **Write format is modern LTX.** We write `superfly/ltx v0.5.2` LTX files with compaction levels
   0..9 (snapshots at level 9) under `ltx/{level}/{min}-{max}.ltx`, exactly matching current
-  litestream. We deliberately do **not** read legacy v0.3.x generation backups
-  (`generations/…/snapshots|wal/*.lz4`); the LZ4 frame codec and generation-listing interfaces that
-  would be needed are intentionally omitted.
+  litestream.
+- **Legacy v0.3.x generation reads.** We can also **read** old v0.3.x generation backups
+  (`generations/{gen}/snapshots/{index}.snapshot.lz4` + `wal/{index}_{offset}.wal.lz4`) via the LZ4
+  **frame** codec (`lz4js`) and `GenerationClientV3`. `Replica.restore()` falls back to `restoreV3()`
+  when the client implements it and there are no LTX files. The file backend implements
+  `GenerationClientV3`; addon backends may choose to as well.
 - **Single-writer semantics (important).** This is a backup/DR tool for **one** SQLite database, not
   a distributed database. The lease elects a single writer to storage but never merges or reconciles
   data across hosts. Pointing several hosts at one prefix is only correct when they hold the **same**
