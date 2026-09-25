@@ -46,7 +46,7 @@ Verified on Node `v24.21.0`.
 > `AsyncByteReader` / `FileSink`, S3 multipart ≥5 MiB), multi-level compaction + retention/GC
 > (L0→…→L9 with litestream-style time-bucketed scheduling), a **pnpm monorepo** with an **S3 addon**
 > (`packages/backend-s3`), distributed **leasing** (`lock.json` conditional writes), and continuous
-> **follow-restore** (`Replica.follow()`). Test suite: **125 tests (107 core + 18 S3)**, green on
+> **follow-restore** (`Replica.follow()`). Test suite: **127 tests (109 core + 18 S3)**, green on
 > Node 24 & 26.
 
 > **Interop note (Milestone 1):** Go's `superfly/ltx` golden file-checksum vectors

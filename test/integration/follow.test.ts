@@ -18,6 +18,11 @@ async function readTxid(path: string): Promise<bigint | null> {
   }
 }
 
+/** Writes a follow `-txid` sidecar value. */
+async function writeTxid(path: string, txid: bigint): Promise<void> {
+  await writeFile(path, txid.toString(16).padStart(16, '0') + '\n');
+}
+
 /** Polls `predicate` until true or the timeout elapses. */
 async function waitFor(predicate: () => Promise<boolean>, ms = 4000): Promise<void> {
   const start = Date.now();
@@ -118,6 +123,62 @@ test('follow: errors when the DB exists but the -txid sidecar is missing', async
     await assert.rejects(
       replica.follow({ outputPath: out, intervalMs: 20 }),
       /exists but .* is missing/,
+    );
+  } finally {
+    replica.close();
+    t.close();
+  }
+});
+
+test('follow: errors when the saved TXID is ahead of the latest snapshot', async () => {
+  const t = createWALDB(['a']);
+  const client = new FileReplicaClient(makeTempDir('repl-'));
+  const replica = new Replica(t.path, client);
+  const out = join(makeTempDir('follow-'), 'db.db');
+
+  try {
+    await replica.sync(); // TXID 1
+    await replica.restore({ outputPath: out });
+    await writeTxid(`${out}-txid`, 100n); // DB claims to be far ahead of the replica
+    await assert.rejects(
+      replica.follow({ outputPath: out, intervalMs: 20 }),
+      /ahead of the latest snapshot/,
+    );
+  } finally {
+    replica.close();
+    t.close();
+  }
+});
+
+test('follow: errors when the saved TXID is below the retained files (oldest pruned)', async () => {
+  const t = createWALDB(['a']);
+  const client = new FileReplicaClient(makeTempDir('repl-'));
+  const replica = new Replica(t.path, client);
+  const out = join(makeTempDir('follow-'), 'db.db');
+
+  try {
+    // Produce four contiguous L0 files [1..1]..[4..4].
+    await replica.sync();
+    for (const name of ['b', 'c', 'd']) {
+      t.db.exec(`INSERT INTO t (name) VALUES ('${name}')`);
+      await replica.sync();
+    }
+
+    // Restore the DB, then delete the two oldest files to simulate retention.
+    await replica.restore({ outputPath: out });
+    const toDelete: import('../../src/index.ts').FileInfo[] = [];
+    for await (const f of client.ltxFiles({ level: 0, seek: 0n, useMetadata: false })) {
+      if (f.minTXID <= 2n) toDelete.push(f);
+    }
+    await client.deleteLtxFiles(toDelete);
+
+    // Pretend we previously resumed from TXID 1, which is now below the retained
+    // files (3, 4 remain) => the next needed file is gone.
+    await writeTxid(`${out}-txid`, 1n);
+
+    await assert.rejects(
+      replica.follow({ outputPath: out, intervalMs: 20 }),
+      /older than the earliest retained snapshot/,
     );
   } finally {
     replica.close();

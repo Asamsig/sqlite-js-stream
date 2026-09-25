@@ -693,6 +693,7 @@ export class Replica {
       if (saved === null) throw new Error(`follow: invalid TXID in ${txidPath}`);
       currentMax = saved;
       pageSize = await readDbPageSize(outputPath);
+      await this.validateResumePoint(currentMax, outputPath, txidPath);
     }
 
     // Poll and apply new files until aborted. Batches are applied atomically-ish:
@@ -711,6 +712,27 @@ export class Replica {
       } catch {
         break; // aborted during the sleep
       }
+    }
+  }
+
+  /**
+   * Guards a follow() resume against an inconsistent state: if the saved TXID is
+   * ahead of every TXID the replica holds, the DB/sidecar cannot be trusted and
+   * must be re-restored. (A saved TXID below the retained window is caught later
+   * as a data gap in {@link collectFollowBatch}.)
+   */
+  private async validateResumePoint(saved: bigint, outputPath: string, txidPath: string): Promise<void> {
+    let latestMax = 0n;
+    for (let level = 0; level <= SnapshotLevel; level++) {
+      for await (const info of this.client.ltxFiles({ level, seek: 0n, useMetadata: false })) {
+        if (info.maxTXID > latestMax) latestMax = info.maxTXID;
+      }
+    }
+    if (latestMax !== 0n && saved > latestMax) {
+      throw new Error(
+        `follow: saved TXID ${hexTxid(saved)} is ahead of the latest snapshot ` +
+          `(${hexTxid(latestMax)}); delete ${outputPath} and ${txidPath} then re-restore`,
+      );
     }
   }
 
@@ -766,8 +788,9 @@ export class Replica {
       if (info.minTXID > cursor + 1n) {
         if (batch.length === 0) {
           throw new Error(
-            `follow: data gap after txid ${hexTxid(currentMax)}; ` +
-              'retention may have pruned the required files',
+            `follow: saved TXID ${hexTxid(currentMax)} is older than the earliest ` +
+              'retained snapshot; retention has pruned the required history; delete the ' +
+              'database and re-restore',
           );
         }
         break;
