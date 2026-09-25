@@ -22,5 +22,5 @@ export * from './replica.ts';
 export * from './store.ts';
 export * from './leaser.ts';
 // Logger is part of the public ReplicaClient contract; expose it so addons
-// (e.g. S3/GCS backends) can implement the interface consistently.
+// (e.g. the S3 backend) can implement the interface consistently.
 export * from './util/logger.ts';

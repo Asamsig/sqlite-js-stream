@@ -62,7 +62,7 @@ Verified on Node `v24.21.0`.
 
 Litestream runs as a background process that watches a SQLite database's **WAL file**, converts the
 changing pages into immutable **LTX (Log Transaction) files**, and replicates them to a replica
-destination (S3, GCS, Azure, SFTP, or local files). It also produces **snapshots** (full DB → LTX)
+destination (S3, or local files). It also produces **snapshots** (full DB → LTX)
 and supports **restore** (reconstruct a database from a set of LTX files).
 
 It never writes to the database through the SQLite WAL/VFS as part of normal replication — it reads
@@ -534,9 +534,6 @@ backups.
 - **S3 backend** — ✅ **implemented** as a monorepo addon `packages/backend-s3`:
   `S3ReplicaClient` (multipart upload ≥5 MiB, `If-None-Match`/`If-Match` conditional writes) + `S3Leaser`. Importing it registers the `s3` scheme so
   `newReplicaClientFromURL('s3://bucket/prefix')` resolves.
-- **More cloud backends** — *not yet built*: `gs/`, `abs/`, `sftp/`, `nats/`. Each is a new addon
-  package following the `packages/backend-s3` pattern (implement `ReplicaClient` + optional
-  `Leaser`, register the URL scheme on import).
 - **Distributed leasing** — ✅ **implemented** (`src/leaser.ts` + file/S3 leasers): a `Leaser`
   acquires/renews/releases a `lock.json` lease; `Replica.run()` becomes a **primary** (writes) or a
   **follower** (polls), gating all storage-write methods on lease ownership. File backend uses
@@ -589,7 +586,7 @@ backups.
 
 ## 9. Out of scope for MVP (documented, deferred)
 
-- Cloud object-store backends — **S3 done** (addon `packages/backend-s3`); GCS/Azure/SFTP/NATS deferred.
+- Cloud object-store backends — **S3 done** (addon `packages/backend-s3`); further backends are deliberately out of scope.
 - Distributed leasing / lock.json — **done** (`src/leaser.ts` + file/S3 leasers).
 - VFS real-time mirroring.
 - Unix-socket IPC server.

@@ -297,5 +297,5 @@ on the specific subclass) instead of matching message text.
   data across hosts. Pointing several hosts at one prefix is only correct when they hold the **same**
   logical data (see [Distributed leasing](#distributed-leasing)); separate databases must use separate
   prefixes.
-- Cloud backends beyond S3 (GCS/Azure/SFTP/NATS), VFS mirroring, and the IPC server are not yet
-  implemented. Distributed leasing is implemented for the file and S3 backends (see above).
+- Cloud backends beyond S3, VFS mirroring, and the IPC server are out of scope. Distributed leasing
+  is implemented for the file and S3 backends (see above).
