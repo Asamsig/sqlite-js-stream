@@ -35,7 +35,7 @@ prevents the WAL from being checkpointed past our position.
 | **LTX module** (`src/ltx/`) | Encode/decode LTX files; CRC-64 ISO checksums; LZ4 *block* codec; page index; in-memory `Compactor` and streaming `StreamingCompactor`. |
 | **WAL module** (`src/wal/`) | Parse SQLite WAL header/frames; verify salt + checksum; produce `pageMap()` (latest committed page offsets). |
 | **LocalDatabase** (`src/db.ts`, internal) | Reads a database + `-wal` directly from disk, builds LTX files (base snapshot, incremental L0, level-9 snapshot), and tracks the local position. It holds a short-lived **read-only** `node:sqlite` read transaction to **pin the WAL snapshot** (SQLite won't checkpoint/truncate past an active reader), then reads the files via `fs`. It is an internal implementation detail, not part of the public API. |
-| **Replica** (`src/replica.ts`) | Upload level-0/level-9 LTX files to a client; track the replicated position; `restore()`, `ensureExists()`, `syncStatus()`, `compact()`, `enforceRetention()`, `run()`. |
+| **Replica** (`src/replica.ts`) | Upload level-0/level-9 LTX files to a client; track the replicated position; `restore()`, `follow()`, `ensureExists()`, `syncStatus()`, `compact()`, `enforceRetention()`, `run()`. |
 | **ReplicaClient** (`src/replica-client.ts`) | An interface to a storage backend (`LTXFiles`, `OpenLTXFile`, `WriteLTXFile`, `DeleteLTXFiles`, `DeleteAll`). Addons implement this to add upload strategies. |
 | **File backend** (`src/backends/file/`) | The simplest backend: store LTX files in `<root>/ltx/<level>/<min>-<max>.ltx`, atomic writes. |
 | **Store** (`src/store.ts`) | Coordinate multiple `Replica`s: `syncAll()`, `snapshotAll()`, `compactAll()`, `enforceRetentionAll()`, `run()`. |
@@ -93,6 +93,21 @@ sync error is logged and the loop keeps going.
 
 Because restore never materializes the full merged LTX (or the whole DB) in memory, peak memory is
 bounded by one page buffer plus the (small) page index, regardless of the database size.
+
+### Replica.follow()
+
+`follow()` is litestream's `restore -f` continuous mode. It first restores the latest backup to
+`outputPath`, then polls (default every 1s) and overlays any newly replicated LTX files into that
+database, keeping a **read-only** replica up to date with the primary.
+
+- It records the last applied TXID in a `-txid` sidecar (atomically temp+rename) after each batch, so
+  a later `follow()` resumes from that point instead of re-restoring. LTX files are immutable and
+  page content is deterministic, so re-applying a batch after a crash is idempotent (the stale
+  sidecar simply replays the same pages).
+- It refuses to resume if the DB exists but the `-txid` sidecar is missing (it can't prove the file
+  matches the replica), throws on a malformed sidecar, and throws on a TXID gap (e.g. retention
+  pruned the next needed file).
+- The restored DB must be opened **read-only**; a writer would conflict with the overlaid pages.
 
 ---
 

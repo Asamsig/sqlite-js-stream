@@ -45,8 +45,9 @@ Verified on Node `v24.21.0`.
 > **Post-MVP hardening & features completed:** streaming for large DBs (`StreamLtxReader` /
 > `AsyncByteReader` / `FileSink`, S3 multipart ≥5 MiB), multi-level compaction + retention/GC
 > (L0→…→L9 with litestream-style time-bucketed scheduling), a **pnpm monorepo** with an **S3 addon**
-> (`packages/backend-s3`), distributed **leasing** (`lock.json` conditional writes). Test suite:
-> **121 tests (103 core + 18 S3)**, green on Node 24 & 26.
+> (`packages/backend-s3`), distributed **leasing** (`lock.json` conditional writes), and continuous
+> **follow-restore** (`Replica.follow()`). Test suite: **125 tests (107 core + 18 S3)**, green on
+> Node 24 & 26.
 
 > **Interop note (Milestone 1):** Go's `superfly/ltx` golden file-checksum vectors
 > (`0xe27f4c18f0da2c10`, `0xd926967672f7ca53`) are pinned in `test/ltx/golden.test.ts`. Our `lz4js`
@@ -352,6 +353,7 @@ await replica.compact()                     // litestream-style per-level compac
 await replica.enforceRetention()            // time-based snapshot + L0 retention / GC
 
 await replica.restore({ outputPath: '/data/restored.db', timestamp })  // snapshot + L0 overlay
+await replica.follow({ outputPath: '/data/replica.db', signal })   // continuous read-only restore
 replica.close()
 
 // Multi-DB coordination
@@ -539,6 +541,8 @@ backups.
   acquires/renews/releases a `lock.json` lease; `Replica.run()` becomes a **primary** (writes) or a
   **follower** (polls), gating all storage-write methods on lease ownership. File backend uses
   exclusive-create + content-hash etag; S3 uses `If-None-Match`/`If-Match` conditional writes.
+- **Follow mode** — ✅ **implemented** (`Replica.follow()`): continuously restores new LTX files into
+  a read-only replica, resuming from a `-txid` sidecar (see §5 and ARCHITECTURE `Replica.follow()`).
 - **VFS real-time mirroring** (`vfs.go` port — hook into SQLite VFS; likely deferred).
 - **IPC Unix-socket control server** (`server.go`).
 - **CLI** (`litestream replicate/restore/ltx/reset/snapshots`) + YAML config — *not built*; library
@@ -591,7 +595,7 @@ backups.
 - Unix-socket IPC server.
 - CLI (`litestream replicate`, `restore`, `ltx`, `reset`, `snapshots`) + YAML config.
 - Metrics/telemetry (Prometheus) and rich diagnostics.
-- `--txid`/timestamp point-in-time restore edge cases and `follow` mode.
+- `--txid`/timestamp point-in-time restore edge cases.
 
 ---
 

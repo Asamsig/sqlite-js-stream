@@ -17,7 +17,7 @@
  */
 
 import { createReadStream } from 'node:fs';
-import { access, mkdir, open, rename, rm, stat, type FileHandle } from 'node:fs/promises';
+import { access, mkdir, open, readFile, rename, rm, stat, type FileHandle } from 'node:fs/promises';
 import nodePath from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -51,6 +51,24 @@ export interface RestoreOptions {
   outputPath: string;
   txID?: bigint;
   timestamp?: Date;
+}
+
+/** Options for {@link Replica.follow}, litestream's `restore -f` continuous mode. */
+export interface FollowOptions {
+  /** Output database path to continuously restore into. */
+  outputPath: string;
+  /** Milliseconds between polls for new LTX files. Defaults to 1000. */
+  intervalMs?: number;
+  /** Abort to stop the follow loop. */
+  signal?: AbortSignal;
+  /**
+   * Sidecar file recording the last applied TXID, so a later `follow()` can
+   * resume instead of re-restoring. Defaults to `${outputPath}-txid`. Written
+   * atomically (temp + rename) after each applied batch. `follow()` refuses to
+   * resume when the DB exists but this file is missing (it cannot prove the DB
+   * matches the replica and would otherwise corrupt it).
+   */
+  txidFile?: string;
 }
 
 export interface SyncStatus {
@@ -629,6 +647,187 @@ export class Replica {
     }
   }
 
+  /**
+   * Follow continuously restores new LTX files into {@link FollowOptions.outputPath},
+   * keeping a read-only replica of the database up to date with the primary.
+   *
+   * On the first call (no output DB yet, or the replica is empty) it restores the
+   * latest backup as the base, then polls (every {@link FollowOptions.intervalMs})
+   * and applies any newly replicated LTX files as they appear. It records the
+   * applied TXID in a `-txid` sidecar after each batch so a later `follow()` can
+   * resume, and the loop runs until {@link FollowOptions.signal} is aborted.
+   *
+   * The restored database must only be opened **read-only**; writing to it while
+   * follow runs will conflict with the pages we overlay.
+   */
+  async follow(opt: FollowOptions): Promise<void> {
+    const { outputPath, signal } = opt;
+    if (!outputPath) throw new Error('output path required');
+    const intervalMs = opt.intervalMs ?? 1000;
+    const txidPath = opt.txidFile ?? `${outputPath}-txid`;
+    if (intervalMs < 1) throw new Error('intervalMs must be >= 1');
+
+    // Determine the resume point. We must know the last applied TXID so we only
+    // apply files that come strictly after it. If the DB is missing we do a
+    // fresh latest restore; if it exists we require the -txid sidecar to know
+    // where to resume (otherwise we cannot prove the file matches the replica).
+    let currentMax: bigint;
+    let pageSize: number;
+
+    const dbExists = await statSafe(outputPath);
+    const txidExists = await statSafe(txidPath);
+
+    if (!dbExists) {
+      const plan = await this.waitForInitialRestore(outputPath, intervalMs, signal);
+      currentMax = plan[plan.length - 1].maxTXID;
+      await writeTxidFile(txidPath, currentMax);
+      pageSize = await readDbPageSize(outputPath);
+    } else {
+      if (!txidExists) {
+        throw new Error(
+          `follow: database ${outputPath} exists but ${txidPath} is missing; ` +
+            'delete the database and re-run follow',
+        );
+      }
+      const saved = await readTxidFile(txidPath);
+      if (saved === null) throw new Error(`follow: invalid TXID in ${txidPath}`);
+      currentMax = saved;
+      pageSize = await readDbPageSize(outputPath);
+    }
+
+    // Poll and apply new files until aborted. Batches are applied atomically-ish:
+    // overlay pages, truncate, fsync, THEN advance the -txid sidecar. If we crash
+    // mid-batch the sidecar is stale and the next run re-applies the same files
+    // (LTX files are immutable and page content is deterministic, so this is safe).
+    while (!signal?.aborted) {
+      const batch = await this.collectFollowBatch(currentMax);
+      if (batch.length > 0) {
+        currentMax = await this.applyFollowBatch(outputPath, batch, currentMax, pageSize);
+        await writeTxidFile(txidPath, currentMax);
+      }
+      if (signal?.aborted) break;
+      try {
+        await sleep(intervalMs, undefined, { signal });
+      } catch {
+        break; // aborted during the sleep
+      }
+    }
+  }
+
+  /**
+   * Waits for the first backup to appear on an empty replica, then restores it
+   * as the follow base. Returns the plan that was applied.
+   */
+  private async waitForInitialRestore(
+    outputPath: string,
+    intervalMs: number,
+    signal?: AbortSignal,
+  ): Promise<FileInfo[]> {
+    for (;;) {
+      if (signal?.aborted) throw new Error('follow aborted before initial restore');
+      try {
+        const plan = await calcRestorePlan(this.client, 0n);
+        await this.restore({ outputPath });
+        return plan;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        // An empty replica is the only case we retry; anything else is a real error.
+        if (!(err instanceof Error && err.message === 'no matching backup files available')) {
+          throw err;
+        }
+        await sleep(intervalMs, undefined, { signal });
+      }
+    }
+  }
+
+  /**
+   * Returns the contiguous run of LTX files (across all compaction levels) that
+   * extend the applied position `currentMax`, in application order. Prefers the
+   * highest (most compacted) level for a range and stops at the first gap. Throws
+   * if the very next file (currentMax + 1) is missing, e.g. retention pruned it.
+   */
+  private async collectFollowBatch(currentMax: bigint): Promise<FileInfo[]> {
+    const candidates: FileInfo[] = [];
+    for (let level = 0; level <= SnapshotLevel; level++) {
+      for await (const info of this.client.ltxFiles({ level, seek: 0n, useMetadata: false })) {
+        if (info.maxTXID <= currentMax) continue;
+        candidates.push(info);
+      }
+    }
+    candidates.sort((a, b) =>
+      a.minTXID !== b.minTXID ? (a.minTXID < b.minTXID ? -1 : 1) : b.level - a.level,
+    );
+
+    const batch: FileInfo[] = [];
+    let cursor = currentMax;
+    const seen: Array<[bigint, bigint]> = [];
+    for (const info of candidates) {
+      if (info.maxTXID <= cursor) continue;
+      if (info.minTXID > cursor + 1n) {
+        if (batch.length === 0) {
+          throw new Error(
+            `follow: data gap after txid ${hexTxid(currentMax)}; ` +
+              'retention may have pruned the required files',
+          );
+        }
+        break;
+      }
+      if (seen.some(([lo, hi]) => lo <= info.minTXID && info.maxTXID <= hi)) continue;
+      batch.push(info);
+      cursor = info.maxTXID;
+      seen.push([info.minTXID, info.maxTXID]);
+    }
+    return batch;
+  }
+
+  /**
+   * Applies a contiguous batch of LTX files to the existing `outputPath` DB by
+   * overlaying each file's pages (a later page wins) and truncating to the final
+   * commit size. Returns the TXID now applied.
+   */
+  private async applyFollowBatch(
+    outputPath: string,
+    batch: FileInfo[],
+    currentMax: bigint,
+    pageSize: number,
+  ): Promise<bigint> {
+    const sources: Array<{ destroy?: () => void }> = [];
+    let fh: FileHandle | null = null;
+    let commit = 0;
+    let appliedMax = currentMax;
+    try {
+      fh = await open(outputPath, 'r+');
+      for (const info of batch) {
+        const reader = await this.openStreamReader(info, sources);
+        await reader.readHeader();
+        const hdr = reader.Header();
+        if (hdr.pageSize !== pageSize) {
+          throw new Error(`mismatched page sizes: ${pageSize} != ${hdr.pageSize}`);
+        }
+        commit = hdr.commit;
+        await overlayPagesToFile(fh, reader, pageSize);
+        await reader.verify();
+        appliedMax = info.maxTXID;
+      }
+      await fh.truncate(commit * pageSize);
+      await fh.sync();
+      await fh.close();
+      fh = null;
+    } catch (err) {
+      if (fh !== null) await fh.close().catch(() => {});
+      throw err;
+    } finally {
+      for (const s of sources) {
+        try {
+          s.destroy?.();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    return appliedMax;
+  }
+
   /** Opens a streaming LTX reader over a plan file from the client. */
   private async openStreamReader(
     info: FileInfo,
@@ -1105,5 +1304,69 @@ async function writeAllAt(
       position + offset,
     );
     offset += bytesWritten;
+  }
+}
+
+/** Returns true if `path` exists. */
+async function statSafe(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Encodes a TXID as the 16-char lowercase hex used in LTX filenames. */
+function hexTxid(txid: bigint): string {
+  return txid.toString(16).padStart(16, '0');
+}
+
+/** Decodes a (possibly trimmed) 1..16 char hex TXID; null on malformed input. */
+function decodeTxid(s: string): bigint | null {
+  const t = s.trim();
+  if (!/^[0-9a-fA-F]{1,16}$/.test(t)) return null;
+  try {
+    return BigInt(`0x${t}`);
+  } catch {
+    return null;
+  }
+}
+
+/** Reads the last applied TXID from a follow sidecar file, or null if absent/invalid. */
+async function readTxidFile(path: string): Promise<bigint | null> {
+  try {
+    return decodeTxid(await readFile(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** Atomically writes the applied TXID to a follow sidecar file (temp + rename). */
+async function writeTxidFile(path: string, txid: bigint): Promise<void> {
+  const tmp = `${path}.tmp`;
+  await mkdir(nodePath.dirname(path), { recursive: true });
+  const fh = await open(tmp, 'w');
+  try {
+    await fh.writeFile(hexTxid(txid) + '\n');
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await rename(tmp, path);
+}
+
+/** Reads the SQLite page size from a database file header (offset 16, BE 16-bit). */
+async function readDbPageSize(path: string): Promise<number> {
+  const fh = await open(path, 'r');
+  try {
+    const buf = Buffer.alloc(4);
+    const { bytesRead } = await fh.read(buf, 0, 4, 16);
+    if (bytesRead !== 4) throw new Error(`cannot read database header of ${path}`);
+    const raw = buf.readUInt16BE(0);
+    // SQLite encodes a 64 KiB page size as 1.
+    return raw === 1 ? 65536 : raw;
+  } finally {
+    await fh.close();
   }
 }

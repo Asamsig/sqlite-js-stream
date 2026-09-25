@@ -96,6 +96,20 @@ Restore to a specific transaction ID:
 await replica.restore({ outputPath: '/data/app-at-txid.db', txID: 42n });
 ```
 
+### Continuously restore (follow)
+
+`follow()` restores the latest backup, then keeps the database up to date as new backups are
+replicated — maintaining a read-only replica (litestream's `restore -f`):
+
+```ts
+const ac = new AbortController();
+await replica.follow({ outputPath: '/data/replica.db', intervalMs: 1000, signal: ac.signal });
+// later: ac.abort() to stop
+```
+
+The applied TXID is recorded in a `-txid` sidecar (default `<outputPath>-txid`) so a later `follow()`
+resumes instead of re-restoring. The output database should only be opened **read-only**.
+
 ### Restore the local database if it is missing
 
 ```ts
