@@ -5,7 +5,14 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { FileReplicaClient, Replica } from '../../src/index.ts';
+import {
+  FileReplicaClient,
+  FollowAheadOfLatestError,
+  FollowDataGapError,
+  FollowInvalidTxidError,
+  FollowMissingTxidError,
+  Replica,
+} from '../../src/index.ts';
 import { createWALDB, makeTempDir } from '../helpers/make-db.ts';
 
 /** Reads the value written to a follow `-txid` sidecar, or null. */
@@ -122,7 +129,11 @@ test('follow: errors when the DB exists but the -txid sidecar is missing', async
     await replica.restore({ outputPath: out }); // DB exists, no -txid sidecar
     await assert.rejects(
       replica.follow({ outputPath: out, intervalMs: 20 }),
-      /exists but .* is missing/,
+      (err: unknown) => {
+        assert.ok(err instanceof FollowMissingTxidError);
+        assert.equal((err as FollowMissingTxidError).code, 'ERR_FOLLOW_DB_WITHOUT_TXID');
+        return true;
+      },
     );
   } finally {
     replica.close();
@@ -142,7 +153,11 @@ test('follow: errors when the saved TXID is ahead of the latest snapshot', async
     await writeTxid(`${out}-txid`, 100n); // DB claims to be far ahead of the replica
     await assert.rejects(
       replica.follow({ outputPath: out, intervalMs: 20 }),
-      /ahead of the latest snapshot/,
+      (err: unknown) => {
+        assert.ok(err instanceof FollowAheadOfLatestError);
+        assert.equal((err as FollowAheadOfLatestError).code, 'ERR_FOLLOW_AHEAD_OF_LATEST');
+        return true;
+      },
     );
   } finally {
     replica.close();
@@ -178,7 +193,11 @@ test('follow: errors when the saved TXID is below the retained files (oldest pru
 
     await assert.rejects(
       replica.follow({ outputPath: out, intervalMs: 20 }),
-      /older than the earliest retained snapshot/,
+      (err: unknown) => {
+        assert.ok(err instanceof FollowDataGapError);
+        assert.equal((err as FollowDataGapError).code, 'ERR_FOLLOW_OLDER_THAN_EARLIEST');
+        return true;
+      },
     );
   } finally {
     replica.close();
@@ -196,7 +215,14 @@ test('follow: errors on a malformed -txid sidecar', async () => {
     await replica.sync();
     await replica.restore({ outputPath: out });
     await writeFile(`${out}-txid`, 'not-a-txid\n');
-    await assert.rejects(replica.follow({ outputPath: out, intervalMs: 20 }), /invalid TXID/);
+    await assert.rejects(
+      replica.follow({ outputPath: out, intervalMs: 20 }),
+      (err: unknown) => {
+        assert.ok(err instanceof FollowInvalidTxidError);
+        assert.equal((err as FollowInvalidTxidError).code, 'ERR_FOLLOW_INVALID_TXID');
+        return true;
+      },
+    );
   } finally {
     replica.close();
     t.close();

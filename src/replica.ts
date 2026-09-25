@@ -71,6 +71,60 @@ export interface FollowOptions {
   txidFile?: string;
 }
 
+/**
+ * Base class for errors thrown by {@link Replica.follow}. Carries a stable,
+ * Node-style `code` so callers can branch on the failure without matching
+ * message text, and can be caught via `instanceof`.
+ */
+export class FollowError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'FollowError';
+    this.code = code;
+  }
+}
+
+/** The database exists but its `-txid` sidecar is missing, so we can't resume. */
+export class FollowMissingTxidError extends FollowError {
+  constructor(message: string) {
+    super('ERR_FOLLOW_DB_WITHOUT_TXID', message);
+    this.name = 'FollowMissingTxidError';
+  }
+}
+
+/** The `-txid` sidecar is present but does not parse as a TXID. */
+export class FollowInvalidTxidError extends FollowError {
+  constructor(message: string) {
+    super('ERR_FOLLOW_INVALID_TXID', message);
+    this.name = 'FollowInvalidTxidError';
+  }
+}
+
+/** The saved TXID is ahead of anything the replica holds; re-restore. */
+export class FollowAheadOfLatestError extends FollowError {
+  constructor(message: string) {
+    super('ERR_FOLLOW_AHEAD_OF_LATEST', message);
+    this.name = 'FollowAheadOfLatestError';
+  }
+}
+
+/** The saved TXID is below the retained window; retention pruned the next file. */
+export class FollowDataGapError extends FollowError {
+  constructor(message: string) {
+    super('ERR_FOLLOW_OLDER_THAN_EARLIEST', message);
+    this.name = 'FollowDataGapError';
+  }
+}
+
+/** Follow was aborted before the initial restore could complete. */
+export class FollowAbortedError extends FollowError {
+  constructor(message: string) {
+    super('ERR_FOLLOW_ABORTED', message);
+    this.name = 'FollowAbortedError';
+  }
+}
+
 export interface SyncStatus {
   localTXID: bigint;
   remoteTXID: bigint;
@@ -684,13 +738,13 @@ export class Replica {
       pageSize = await readDbPageSize(outputPath);
     } else {
       if (!txidExists) {
-        throw new Error(
-          `follow: database ${outputPath} exists but ${txidPath} is missing; ` +
+        throw new FollowMissingTxidError(
+          `database ${outputPath} exists but ${txidPath} is missing; ` +
             'delete the database and re-run follow',
         );
       }
       const saved = await readTxidFile(txidPath);
-      if (saved === null) throw new Error(`follow: invalid TXID in ${txidPath}`);
+      if (saved === null) throw new FollowInvalidTxidError(`invalid TXID in ${txidPath}`);
       currentMax = saved;
       pageSize = await readDbPageSize(outputPath);
       await this.validateResumePoint(currentMax, outputPath, txidPath);
@@ -729,8 +783,8 @@ export class Replica {
       }
     }
     if (latestMax !== 0n && saved > latestMax) {
-      throw new Error(
-        `follow: saved TXID ${hexTxid(saved)} is ahead of the latest snapshot ` +
+      throw new FollowAheadOfLatestError(
+        `saved TXID ${hexTxid(saved)} is ahead of the latest snapshot ` +
           `(${hexTxid(latestMax)}); delete ${outputPath} and ${txidPath} then re-restore`,
       );
     }
@@ -746,7 +800,7 @@ export class Replica {
     signal?: AbortSignal,
   ): Promise<FileInfo[]> {
     for (;;) {
-      if (signal?.aborted) throw new Error('follow aborted before initial restore');
+      if (signal?.aborted) throw new FollowAbortedError('aborted before the initial restore');
       try {
         const plan = await calcRestorePlan(this.client, 0n);
         await this.restore({ outputPath });
@@ -787,8 +841,8 @@ export class Replica {
       if (info.maxTXID <= cursor) continue;
       if (info.minTXID > cursor + 1n) {
         if (batch.length === 0) {
-          throw new Error(
-            `follow: saved TXID ${hexTxid(currentMax)} is older than the earliest ` +
+          throw new FollowDataGapError(
+            `saved TXID ${hexTxid(currentMax)} is older than the earliest ` +
               'retained snapshot; retention has pruned the required history; delete the ' +
               'database and re-restore',
           );

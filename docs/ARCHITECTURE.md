@@ -107,6 +107,10 @@ database, keeping a **read-only** replica up to date with the primary.
 - It refuses to resume if the DB exists but the `-txid` sidecar is missing (it can't prove the file
   matches the replica), throws on a malformed sidecar, and throws on a TXID gap (e.g. retention
   pruned the next needed file).
+- Resume/inconsistency failures are typed: `FollowMissingTxidError` (`ERR_FOLLOW_DB_WITHOUT_TXID`),
+  `FollowInvalidTxidError` (`ERR_FOLLOW_INVALID_TXID`), `FollowAheadOfLatestError`
+  (`ERR_FOLLOW_AHEAD_OF_LATEST`), `FollowDataGapError` (`ERR_FOLLOW_OLDER_THAN_EARLIEST`), and
+  `FollowAbortedError` (`ERR_FOLLOW_ABORTED`) — all extend `FollowError` and carry a `.code`.
 - The restored DB must be opened **read-only**; a writer would conflict with the overlaid pages.
 
 ---
