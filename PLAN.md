@@ -46,8 +46,8 @@ Verified on Node `v24.21.0`.
 > `AsyncByteReader` / `FileSink`, S3 multipart ≥5 MiB), multi-level compaction + retention/GC
 > (L0→…→L9 with litestream-style time-bucketed scheduling), a **pnpm monorepo** with an **S3 addon**
 > (`packages/backend-s3`), distributed **leasing** (`lock.json` conditional writes), and continuous
-> **follow-restore** (`Replica.follow()`). Test suite: **127 tests (109 core + 18 S3)**, green on
-> Node 24 & 26.
+> **follow-restore** (`Replica.follow()`), and a typed-error convention (`SqliteJsStreamError` + `.code`).
+> Test suite: **130 tests (112 core + 18 S3)**, green on Node 24 & 26.
 
 > **Interop note (Milestone 1):** Go's `superfly/ltx` golden file-checksum vectors
 > (`0xe27f4c18f0da2c10`, `0xd926967672f7ca53`) are pinned in `test/ltx/golden.test.ts`. Our `lz4js`

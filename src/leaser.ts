@@ -14,6 +14,8 @@
  * live one.
  */
 
+import { SqliteJsStreamError } from './errors.ts';
+
 /** A held lease. `etag` is the conditional-write token for renew/release. */
 export class Lease {
   generation: number;
@@ -40,12 +42,13 @@ export class Lease {
 }
 
 /** The lease is already held by another owner. */
-export class LeaseExistsError extends Error {
+export class LeaseExistsError extends SqliteJsStreamError {
   owner: string;
   expiresAt: number;
 
   constructor(owner: string, expiresAt: number) {
     super(
+      'ERR_LEASE_EXISTS',
       owner !== ''
         ? `lease already held by ${owner} until ${new Date(expiresAt).toISOString()}`
         : `lease already held until ${new Date(expiresAt).toISOString()}`,
@@ -57,9 +60,9 @@ export class LeaseExistsError extends Error {
 }
 
 /** The caller no longer holds the lease (lost it or never acquired it). */
-export class ErrLeaseNotHeld extends Error {
+export class ErrLeaseNotHeld extends SqliteJsStreamError {
   constructor() {
-    super('lease not held');
+    super('ERR_LEASE_NOT_HELD', 'lease not held');
     this.name = 'ErrLeaseNotHeld';
   }
 }

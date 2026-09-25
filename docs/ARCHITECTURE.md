@@ -240,6 +240,25 @@ expires.
 - **SQLite WAL checksums** use the rolling `s0/s1` algorithm, with the byte order selected by the WAL
   magic (`0x377f0682` ⇒ little-endian, `0x377f0683` ⇒ big-endian).
 
+## Errors
+
+Every typed library error extends one base class, [`SqliteJsStreamError`](../src/errors.ts), and
+carries a stable, Node-style `code` string. Callers can catch any library error with a single
+`instanceof SqliteJsStreamError`, and branch on the precise failure via `err.code` (or `instanceof`
+on the specific subclass) instead of matching message text.
+
+| Error | `code` | Meaning |
+|-------|--------|---------|
+| `NoMatchingBackupError` | `ERR_NO_MATCHING_BACKUP` | No LTX files at/below the target TXID. |
+| `PageSizeMismatchError` | `ERR_PAGE_SIZE_MISMATCH` | An incremental file's page size differs from the base. |
+| `InvalidArgumentError` | `ERR_INVALID_ARGUMENT` | A required argument is missing/invalid. |
+| `LTXError` | `ERR_LTX` | An LTX file could not be read/decoded (carries `op`, `path`, `level`, TXIDs). |
+| `LeaseExistsError` | `ERR_LEASE_EXISTS` | The lease is held by another host. |
+| `ErrLeaseNotHeld` | `ERR_LEASE_NOT_HELD` | The caller lost/never held the lease. |
+| `ErrNoCompactionError` (`ErrNoCompaction`) | `ERR_NO_COMPACTION` | Nothing to compact (singleton; use `===`). |
+| `ErrCompactionTooEarlyError` (`ErrCompactionTooEarly`) | `ERR_COMPACTION_TOO_EARLY` | The level was already compacted this bucket (singleton). |
+| `FollowError` subclasses | `ERR_FOLLOW_*` | `follow()` resume/inconsistency failures (see [Replica.follow()](#replica-follow)). |
+
 ---
 
 ## Restrictions & simplifications

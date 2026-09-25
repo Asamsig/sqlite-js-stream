@@ -24,6 +24,7 @@ import {
   unmarshalHeader,
 } from './ltx/index.ts';
 import { ByteReader } from './ltx/index.ts';
+import { SqliteJsStreamError } from './errors.ts';
 import { readU64BE } from './ltx/index.ts';
 import { readAll } from './util/stream.ts';
 import type { Logger } from './util/logger.ts';
@@ -105,7 +106,7 @@ export function ltxFilePath(
 }
 
 /** LTXError wraps errors reading/writing a specific LTX file. */
-export class LTXError extends Error {
+export class LTXError extends SqliteJsStreamError {
   readonly op: string;
   readonly path: string;
   readonly level: number;
@@ -114,7 +115,8 @@ export class LTXError extends Error {
   readonly cause: unknown;
 
   constructor(op: string, path: string, level: number, minTXID: TXID, maxTXID: TXID, err: unknown) {
-    super(`${op} ltx file: ${err instanceof Error ? err.message : String(err)}`);
+    super('ERR_LTX', `${op} ltx file: ${err instanceof Error ? err.message : String(err)}`);
+    this.name = 'LTXError';
     this.op = op;
     this.path = path;
     this.level = level;

@@ -9,6 +9,7 @@ export const VERSION = '0.1.0';
 
 export type TXID = bigint;
 
+export * from './errors.ts';
 export * from './ltx/index.ts';
 export * from './wal/index.ts';
 export * from './replica-client.ts';

@@ -46,6 +46,7 @@ import {
 import { FileSink } from './util/fs.ts';
 import type { Logger } from './util/logger.ts';
 import { noopLogger } from './util/logger.ts';
+import { SqliteJsStreamError } from './errors.ts';
 
 export interface RestoreOptions {
   outputPath: string;
@@ -76,12 +77,10 @@ export interface FollowOptions {
  * Node-style `code` so callers can branch on the failure without matching
  * message text, and can be caught via `instanceof`.
  */
-export class FollowError extends Error {
-  readonly code: string;
+export class FollowError extends SqliteJsStreamError {
   constructor(code: string, message: string) {
-    super(message);
+    super(code, message);
     this.name = 'FollowError';
-    this.code = code;
   }
 }
 
@@ -172,9 +171,46 @@ export interface RetentionResult {
 }
 
 /** Returned by compaction scheduling when there is nothing to compact. */
-export const ErrNoCompaction = new Error('no files to compact');
+export class ErrNoCompactionError extends SqliteJsStreamError {
+  constructor() {
+    super('ERR_NO_COMPACTION', 'no files to compact');
+    this.name = 'ErrNoCompactionError';
+  }
+}
+export const ErrNoCompaction = new ErrNoCompactionError();
+
 /** Returned when a level was already compacted within its current time bucket. */
-export const ErrCompactionTooEarly = new Error('compaction scheduled too early');
+export class ErrCompactionTooEarlyError extends SqliteJsStreamError {
+  constructor() {
+    super('ERR_COMPACTION_TOO_EARLY', 'compaction scheduled too early');
+    this.name = 'ErrCompactionTooEarlyError';
+  }
+}
+export const ErrCompactionTooEarly = new ErrCompactionTooEarlyError();
+
+/** Raised when a restore/plan cannot find LTX files at or below the target. */
+export class NoMatchingBackupError extends SqliteJsStreamError {
+  constructor(message = 'no matching backup files available') {
+    super('ERR_NO_MATCHING_BACKUP', message);
+    this.name = 'NoMatchingBackupError';
+  }
+}
+
+/** Raised when an incremental file's page size differs from the base database. */
+export class PageSizeMismatchError extends SqliteJsStreamError {
+  constructor(message: string) {
+    super('ERR_PAGE_SIZE_MISMATCH', message);
+    this.name = 'PageSizeMismatchError';
+  }
+}
+
+/** Raised when required arguments are missing or invalid. */
+export class InvalidArgumentError extends SqliteJsStreamError {
+  constructor(message: string) {
+    super('ERR_INVALID_ARGUMENT', message);
+    this.name = 'InvalidArgumentError';
+  }
+}
 
 export interface ReplicaRunOptions {
   /** Milliseconds between syncs. Defaults to 1000. */
@@ -639,10 +675,10 @@ export class Replica {
 
   /** Restore reconstructs a SQLite database at `outputPath` from LTX files. */
   async restore(opt: RestoreOptions): Promise<void> {
-    if (!opt.outputPath) throw new Error('output path required');
+    if (!opt.outputPath) throw new InvalidArgumentError('output path required');
 
     const plan = await calcRestorePlan(this.client, opt.txID ?? 0n);
-    if (plan.length === 0) throw new Error('no matching backup files available');
+    if (plan.length === 0) throw new NoMatchingBackupError();
 
     await mkdir(nodePath.dirname(opt.outputPath), { recursive: true });
     const tmp = `${opt.outputPath}.tmp`;
@@ -670,7 +706,7 @@ export class Replica {
         await reader.readHeader();
         const hdr = reader.Header();
         if (hdr.pageSize !== pageSize) {
-          throw new Error(`mismatched page sizes: ${pageSize} != ${hdr.pageSize}`);
+          throw new PageSizeMismatchError(`mismatched page sizes: ${pageSize} != ${hdr.pageSize}`);
         }
         commit = hdr.commit;
         await overlayPagesToFile(fh, reader, pageSize);
@@ -716,10 +752,10 @@ export class Replica {
    */
   async follow(opt: FollowOptions): Promise<void> {
     const { outputPath, signal } = opt;
-    if (!outputPath) throw new Error('output path required');
+    if (!outputPath) throw new InvalidArgumentError('output path required');
     const intervalMs = opt.intervalMs ?? 1000;
     const txidPath = opt.txidFile ?? `${outputPath}-txid`;
-    if (intervalMs < 1) throw new Error('intervalMs must be >= 1');
+    if (intervalMs < 1) throw new InvalidArgumentError('intervalMs must be >= 1');
 
     // Determine the resume point. We must know the last applied TXID so we only
     // apply files that come strictly after it. If the DB is missing we do a
@@ -808,7 +844,7 @@ export class Replica {
       } catch (err) {
         if (signal?.aborted) throw err;
         // An empty replica is the only case we retry; anything else is a real error.
-        if (!(err instanceof Error && err.message === 'no matching backup files available')) {
+        if (!(err instanceof NoMatchingBackupError)) {
           throw err;
         }
         await sleep(intervalMs, undefined, { signal });
@@ -879,7 +915,7 @@ export class Replica {
         await reader.readHeader();
         const hdr = reader.Header();
         if (hdr.pageSize !== pageSize) {
-          throw new Error(`mismatched page sizes: ${pageSize} != ${hdr.pageSize}`);
+          throw new PageSizeMismatchError(`mismatched page sizes: ${pageSize} != ${hdr.pageSize}`);
         }
         commit = hdr.commit;
         await overlayPagesToFile(fh, reader, pageSize);
@@ -1311,10 +1347,10 @@ export async function calcRestorePlan(
   }
 
   if (plan.length === 0) {
-    throw new Error('no matching backup files available');
+    throw new NoMatchingBackupError();
   }
   if (txID !== 0n && currentMax < txID) {
-    throw new Error('no matching backup files available');
+    throw new NoMatchingBackupError();
   }
   return plan;
 }
