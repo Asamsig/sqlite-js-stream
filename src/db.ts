@@ -35,6 +35,7 @@ import {
 } from './wal/index.ts';
 import { SnapshotLevel } from './replica-client.ts';
 import { mkdirAll } from './util/fs.ts';
+import { DatabaseError } from './errors.ts';
 
 /** Reads the page size from the SQLite database header (bytes 16-17). */
 function headerPageSize(buf: Uint8Array): number {
@@ -546,7 +547,7 @@ async function readExact(
   let offset = 0;
   while (offset < buf.length) {
     const { bytesRead } = await handle.read(buf, offset, buf.length - offset, position + offset);
-    if (bytesRead === 0) throw new Error('unexpected end of file while reading a page');
+    if (bytesRead === 0) throw new DatabaseError('unexpected end of file while reading a page');
     offset += bytesRead;
   }
 }

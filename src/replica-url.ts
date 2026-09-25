@@ -4,6 +4,7 @@
  */
 
 import type { ReplicaClient } from './replica-client.ts';
+import { ReplicaURLError } from './errors.ts';
 
 export type ReplicaClientFactory = (
   scheme: string,
@@ -33,7 +34,7 @@ export function newReplicaClientFromURL(rawURL: string): ReplicaClient {
   const parsed = parseReplicaURLWithQuery(rawURL);
   const factory = factories.get(parsed.scheme);
   if (!factory) {
-    throw new Error(`unsupported replica URL scheme: ${parsed.scheme}`);
+    throw new ReplicaURLError(`unsupported replica URL scheme: ${parsed.scheme}`);
   }
   return factory(parsed.scheme, parsed.host, parsed.urlPath, parsed.query, parsed.userinfo);
 }
@@ -44,7 +45,7 @@ export function parseReplicaURLWithQuery(s: string): ParsedReplicaURL {
   try {
     u = new URL(s);
   } catch (err) {
-    throw new Error(`parse replica url ${JSON.stringify(s)}: ${err instanceof Error ? err.message : String(err)}`);
+    throw new ReplicaURLError(`parse replica url ${JSON.stringify(s)}: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const scheme = u.protocol.replace(/:$/, '');
@@ -58,7 +59,7 @@ export function parseReplicaURLWithQuery(s: string): ParsedReplicaURL {
     };
   }
   if (scheme === '') {
-    throw new Error(`replica url scheme required: ${s}`);
+    throw new ReplicaURLError(`replica url scheme required: ${s}`);
   }
 
   return {

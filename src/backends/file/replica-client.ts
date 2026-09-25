@@ -26,6 +26,7 @@ import { HeaderSize, unmarshalHeader } from '../../ltx/index.ts';
 import { concatBytes } from '../../util/stream.ts';
 import { fsyncDir, mkdirAll } from '../../util/fs.ts';
 import type { Logger } from '../../util/logger.ts';
+import { FileReplicaError, InvalidArgumentError } from '../../errors.ts';
 import { noopLogger } from '../../util/logger.ts';
 import { registerReplicaClientFactory } from '../../replica-url.ts';
 
@@ -165,7 +166,7 @@ export class FileReplicaClient implements ReplicaClient {
       }
 
       if (headerBytes === null) {
-        throw new Error('write ltx file: input too short to contain a header');
+        throw new FileReplicaError('write ltx file: input too short to contain a header');
       }
       const hdr: Header = unmarshalHeader(headerBytes);
       const timestamp = Number(hdr.timestamp);
@@ -227,7 +228,7 @@ export function NewReplicaClientFromURL(
   _userinfo: string | null,
 ): ReplicaClient {
   if (!urlPath) {
-    throw new Error('file replica path required');
+    throw new InvalidArgumentError('file replica path required');
   }
   return new FileReplicaClient(urlPath);
 }

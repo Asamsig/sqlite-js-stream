@@ -14,6 +14,7 @@
  */
 
 import lz4 from 'lz4js';
+import { LTXFormatError } from '../errors.ts';
 
 const HASH_SIZE = 1 << 16;
 const hashTable: number[] = new Array(HASH_SIZE);
@@ -45,7 +46,7 @@ export function decompressBlock(data: Uint8Array, uncompressedSize: number): Uin
   const dst = new Uint8Array(uncompressedSize);
   const n = lz4.decompressBlock(data, dst, 0, data.length, 0);
   if (n !== uncompressedSize) {
-    throw new Error(`lz4 block decompressed to ${n} bytes, expected ${uncompressedSize}`);
+    throw new LTXFormatError(`lz4 block decompressed to ${n} bytes, expected ${uncompressedSize}`);
   }
   return dst;
 }

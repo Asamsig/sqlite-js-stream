@@ -8,6 +8,7 @@
  */
 
 import { readU32BE, readU32LE } from '../ltx/bytes.ts';
+import { WALFormatError } from '../errors.ts';
 
 export type ByteOrder = 'le' | 'be';
 
@@ -28,7 +29,7 @@ export function walChecksum(
   b: Uint8Array,
 ): [number, number] {
   if (b.length % 8 !== 0) {
-    throw new Error('misaligned checksum byte slice');
+    throw new WALFormatError('misaligned checksum byte slice');
   }
   for (let i = 0; i < b.length; i += 8) {
     s0 = (s0 + readWalU32(bo, b, i) + s1) >>> 0;

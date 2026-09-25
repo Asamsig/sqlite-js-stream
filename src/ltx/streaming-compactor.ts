@@ -18,6 +18,7 @@ import type { ByteSink } from './sink.ts';
 import { Encoder } from './encoder.ts';
 import type { StreamLtxReader } from './stream.ts';
 import type { Header, PageHeader, Trailer } from './types.ts';
+import { InvalidArgumentError, LTXFormatError, PageSizeMismatchError } from '../errors.ts';
 import { isContiguous } from './types.ts';
 
 interface Input {
@@ -57,7 +58,7 @@ export class StreamingCompactor {
   /** Compact merges all input readers into a single LTX stream. */
   async compact(): Promise<void> {
     if (this.inputs.length === 0) {
-      throw new Error('at least one input reader required');
+      throw new InvalidArgumentError('at least one input reader required');
     }
 
     // Read headers from all inputs.
@@ -70,12 +71,12 @@ export class StreamingCompactor {
       const prevHdr = this.inputs[i - 1].reader.Header();
       const hdr = this.inputs[i].reader.Header();
       if (prevHdr.pageSize !== hdr.pageSize) {
-        throw new Error(
+        throw new PageSizeMismatchError(
           `input files have mismatched page sizes: ${prevHdr.pageSize} != ${hdr.pageSize}`,
         );
       }
       if (!isContiguous(prevHdr.maxTXID, hdr.minTXID, hdr.maxTXID)) {
-        throw new Error(
+        throw new LTXFormatError(
           `non-contiguous transaction ids in input files: (${prevHdr.minTXID},${prevHdr.maxTXID}) -> (${hdr.minTXID},${hdr.maxTXID})`,
         );
       }
@@ -151,7 +152,7 @@ export class StreamingCompactor {
       if (hdr !== null && hdr.pgno === pgno) emitIndex = i;
     }
     if (emitIndex < 0) {
-      throw new Error(`internal: no input holds page ${pgno}`);
+      throw new LTXFormatError(`internal: no input holds page ${pgno}`);
     }
 
     // Emit from the latest matching input, then consume every matching input

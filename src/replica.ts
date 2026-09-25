@@ -46,7 +46,13 @@ import {
 import { FileSink } from './util/fs.ts';
 import type { Logger } from './util/logger.ts';
 import { noopLogger } from './util/logger.ts';
-import { SqliteJsStreamError } from './errors.ts';
+import {
+  DatabaseError,
+  InvalidArgumentError,
+  LTXFormatError,
+  PageSizeMismatchError,
+  SqliteJsStreamError,
+} from './errors.ts';
 
 export interface RestoreOptions {
   outputPath: string;
@@ -196,21 +202,7 @@ export class NoMatchingBackupError extends SqliteJsStreamError {
   }
 }
 
-/** Raised when an incremental file's page size differs from the base database. */
-export class PageSizeMismatchError extends SqliteJsStreamError {
-  constructor(message: string) {
-    super('ERR_PAGE_SIZE_MISMATCH', message);
-    this.name = 'PageSizeMismatchError';
-  }
-}
 
-/** Raised when required arguments are missing or invalid. */
-export class InvalidArgumentError extends SqliteJsStreamError {
-  constructor(message: string) {
-    super('ERR_INVALID_ARGUMENT', message);
-    this.name = 'InvalidArgumentError';
-  }
-}
 
 export interface ReplicaRunOptions {
   /** Milliseconds between syncs. Defaults to 1000. */
@@ -1019,7 +1011,7 @@ export class Replica {
       if (info.maxTXID > maxTXID) maxTXID = info.maxTXID;
     }
     if (minTXID < seek) {
-      throw new Error(
+      throw new LTXFormatError(
         `compaction source ${minTXID}..${maxTXID} overlaps the destination max ${dstMax}`,
       );
     }
@@ -1041,7 +1033,7 @@ export class Replica {
       await compactor.compact();
       const cHeader = compactor.Header();
       if (cHeader.pageSize !== (await this.localDb()).pageSize) {
-        throw new Error(
+        throw new PageSizeMismatchError(
           `compacted page size ${cHeader.pageSize} does not match database ${(await this.localDb()).pageSize}`,
         );
       }
@@ -1375,16 +1367,16 @@ async function writeSnapshotToFile(
       continue;
     }
     const hdr = await reader.readPage(page);
-    if (hdr === null) throw new Error(`unexpected end of pages at pgno ${pgno}`);
+    if (hdr === null) throw new LTXFormatError(`unexpected end of pages at pgno ${pgno}`);
     if (hdr.pgno !== pgno) {
-      throw new Error(`unexpected pgno while decoding page: read ${hdr.pgno}, expected ${pgno}`);
+      throw new LTXFormatError(`unexpected pgno while decoding page: read ${hdr.pgno}, expected ${pgno}`);
     }
     await writeAllAt(fh, page, (pgno - 1) * pageSize);
   }
 
   // Expect one final read to be the end-of-pages marker.
   if ((await reader.readPage(page)) !== null) {
-    throw new Error('unexpected page after end of database');
+    throw new LTXFormatError('unexpected page after end of database');
   }
 }
 
@@ -1475,7 +1467,7 @@ async function readDbPageSize(path: string): Promise<number> {
   try {
     const buf = Buffer.alloc(4);
     const { bytesRead } = await fh.read(buf, 0, 4, 16);
-    if (bytesRead !== 4) throw new Error(`cannot read database header of ${path}`);
+    if (bytesRead !== 4) throw new DatabaseError(`cannot read database header of ${path}`);
     const raw = buf.readUInt16BE(0);
     // SQLite encodes a 64 KiB page size as 1.
     return raw === 1 ? 65536 : raw;

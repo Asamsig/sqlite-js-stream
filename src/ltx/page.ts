@@ -6,6 +6,7 @@ import { PageHeaderSize, PageHeaderFlagSize, MaxPageSize } from './constants.ts'
 import { assertFull, readU16BE, readU32BE, writeU16BE, writeU32BE } from './bytes.ts';
 import { decompressBlockInto } from './lz4.ts';
 import type { PageHeader } from './types.ts';
+import { LTXFormatError } from '../errors.ts';
 
 /** MarshalBinary encodes a PageHeader to its 6-byte representation. */
 export function marshalPageHeader(h: PageHeader): Uint8Array {
@@ -27,10 +28,10 @@ export function unmarshalPageHeader(b: Uint8Array): PageHeader {
 /** Validate returns an error (thrown) if h is invalid. */
 export function validatePageHeader(h: PageHeader): void {
   if (h.pgno === 0) {
-    throw new Error('page number required');
+    throw new LTXFormatError('page number required');
   }
   if ((h.flags & ~PageHeaderFlagSize) !== 0) {
-    throw new Error(`invalid page header flags: 0x${h.flags.toString(16)}`);
+    throw new LTXFormatError(`invalid page header flags: 0x${h.flags.toString(16)}`);
   }
 }
 
@@ -59,21 +60,21 @@ export function decodePageData(b: Uint8Array): DecodedPage {
 
   if ((header.flags & PageHeaderFlagSize) !== 0) {
     if (b.length < PageHeaderSize + 4) {
-      throw new Error('buffer too small for size prefix');
+      throw new LTXFormatError('buffer too small for size prefix');
     }
     const dataSize = readU32BE(b, PageHeaderSize);
     const offset = PageHeaderSize + 4;
     if (b.length < offset + dataSize) {
-      throw new Error(`buffer too small for data: need ${offset + dataSize}, have ${b.length}`);
+      throw new LTXFormatError(`buffer too small for data: need ${offset + dataSize}, have ${b.length}`);
     }
     const compressed = b.subarray(offset, offset + dataSize);
     const buf = new Uint8Array(MaxPageSize);
     const n = decompressBlockInto(compressed, buf);
     if (n <= 0) {
-      throw new Error('decompress block failed');
+      throw new LTXFormatError('decompress block failed');
     }
     return { header, data: buf.subarray(0, n) };
   }
 
-  throw new Error('legacy LZ4 frame format not supported');
+  throw new LTXFormatError('legacy LZ4 frame format not supported');
 }

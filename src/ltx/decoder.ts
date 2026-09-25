@@ -27,6 +27,7 @@ import { unmarshalTrailer } from './trailer.ts';
 import { parsePageIndex } from './page-index.ts';
 import { decompressBlock } from './lz4.ts';
 import { checksumPage } from './checksum.ts';
+import { LTXFormatError } from '../errors.ts';
 
 const stateHeader = 'header';
 const statePage = 'page';
@@ -110,13 +111,13 @@ export class Decoder {
    * or null when the end-of-pages marker is reached.
    */
   decodePage(data: Uint8Array): PageHeader | null {
-    if (this.state === stateClosed) throw new Error('ltx decoder closed');
+    if (this.state === stateClosed) throw new LTXFormatError('ltx decoder closed');
     if (this.state === stateClose) return null;
     if (this.state !== statePage) {
-      throw new Error(`cannot read page header, expected ${this.state}`);
+      throw new LTXFormatError(`cannot read page header, expected ${this.state}`);
     }
     if (data.length !== this.header.pageSize) {
-      throw new Error(`invalid page buffer size: ${data.length}, expecting ${this.header.pageSize}`);
+      throw new LTXFormatError(`invalid page buffer size: ${data.length}, expecting ${this.header.pageSize}`);
     }
 
     const b = this.r.readFull(PageHeaderSize);
@@ -130,7 +131,7 @@ export class Decoder {
     }
 
     if (hdr.pgno > this.header.commit) {
-      throw new Error(`page number ${hdr.pgno} out-of-bounds for commit size ${this.header.commit}`);
+      throw new LTXFormatError(`page number ${hdr.pgno} out-of-bounds for commit size ${this.header.commit}`);
     }
 
     if (hdr.flags & PageHeaderFlagSize) {
@@ -142,7 +143,7 @@ export class Decoder {
       const decompressed = decompressBlock(compressed, this.header.pageSize);
       data.set(decompressed);
     } else {
-      throw new Error('legacy LZ4 frame format not supported');
+      throw new LTXFormatError('legacy LZ4 frame format not supported');
     }
 
     this.hash.update(data);
@@ -174,7 +175,7 @@ export class Decoder {
     this.decodeHeader();
     const hdr = this.header;
     if (!isSnapshot(hdr)) {
-      throw new Error('cannot decode non-snapshot LTX file to SQLite database');
+      throw new LTXFormatError('cannot decode non-snapshot LTX file to SQLite database');
     }
     const lockPg = lockPgno(hdr.pageSize);
     const data = new Uint8Array(hdr.pageSize);
@@ -185,17 +186,17 @@ export class Decoder {
       }
       const ph = this.decodePage(data);
       if (ph === null) {
-        throw new Error(`unexpected end of pages at pgno ${pgno}`);
+        throw new LTXFormatError(`unexpected end of pages at pgno ${pgno}`);
       }
       if (ph.pgno !== pgno) {
-        throw new Error(`unexpected pgno while decoding page: read ${ph.pgno}, expected ${pgno}`);
+        throw new LTXFormatError(`unexpected pgno while decoding page: read ${ph.pgno}, expected ${pgno}`);
       }
       sink.write(data);
     }
 
     // Expect one final read to be the end-of-pages marker.
     if (this.decodePage(data) !== null) {
-      throw new Error('unexpected page after end of database');
+      throw new LTXFormatError('unexpected page after end of database');
     }
     this.close();
   }
@@ -204,7 +205,7 @@ export class Decoder {
   close(): void {
     if (this.state === stateClosed) return;
     if (this.state !== stateClose) {
-      throw new Error(`cannot close, expected ${this.state}`);
+      throw new LTXFormatError(`cannot close, expected ${this.state}`);
     }
 
     const index: PageIndex = new Map();
@@ -218,15 +219,15 @@ export class Decoder {
       (buf) => self.hash.update(buf),
       (pgno, offset, size) => {
         if (pgno > self.header.commit) {
-          throw new Error(`page index pgno ${pgno} exceeds commit ${self.header.commit}`);
+          throw new LTXFormatError(`page index pgno ${pgno} exceeds commit ${self.header.commit}`);
         }
         if (offset < nextOffset) {
-          throw new Error(
+          throw new LTXFormatError(
             `page index pgno ${pgno} offset ${offset} overlaps previous frame ending at ${nextOffset}`,
           );
         }
         if (size <= PageHeaderSize) {
-          throw new Error(`page index pgno ${pgno} has invalid frame size ${size}`);
+          throw new LTXFormatError(`page index pgno ${pgno} has invalid frame size ${size}`);
         }
         nextOffset = offset + size;
         n++;
@@ -244,10 +245,10 @@ export class Decoder {
     );
 
     if (n !== this.pageN) {
-      throw new Error(`page index has ${n} entries but ${this.pageN} pages were decoded`);
+      throw new LTXFormatError(`page index has ${n} entries but ${this.pageN} pages were decoded`);
     }
     if (seq.sum64() !== this.pageSeq.sum64()) {
-      throw new Error('page index does not match the decoded page numbers');
+      throw new LTXFormatError('page index does not match the decoded page numbers');
     }
     this.pageIndex = this.retainPageIndex ? index : null;
 
@@ -256,17 +257,17 @@ export class Decoder {
     this.hash.update(t.subarray(0, TrailerChecksumOffset));
     this.trailer = unmarshalTrailer(t);
     if (this.r.remaining > 0) {
-      throw new Error('unexpected data after trailer');
+      throw new LTXFormatError('unexpected data after trailer');
     }
 
     const computed = ChecksumFlag | this.hash.sum64();
     if (computed !== this.trailer.fileChecksum) {
-      throw new Error('file checksum mismatch');
+      throw new LTXFormatError('file checksum mismatch');
     }
 
     if (isSnapshot(this.header) && !noChecksum(this.header)) {
       if (this.trailer.postApplyChecksum !== this.chksum) {
-        throw new Error(
+        throw new LTXFormatError(
           `post-apply checksum in trailer (${this.trailer.postApplyChecksum.toString(16)}) does not match calculated checksum (${this.chksum.toString(16)})`,
         );
       }

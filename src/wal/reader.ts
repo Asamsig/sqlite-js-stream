@@ -10,6 +10,7 @@ import { WALFrameHeaderSize, WALHeaderSize, WALMagicBE, WALMagicLE, WALVersion }
 import type { ByteOrder } from './checksum.ts';
 import { walChecksum } from './checksum.ts';
 import { readU32BE } from '../ltx/bytes.ts';
+import { WALFormatError } from '../errors.ts';
 
 /** Raised when the WAL ends, or when a salt/checksum mismatch is detected. */
 export class WALEOFError extends Error {}
@@ -59,7 +60,7 @@ export class WALReader {
   /** Creates a reader positioned at `offset`, loading salts from the caller. */
   static withOffset(data: Uint8Array, offset: number, salt1: number, salt2: number): WALReader {
     if (offset <= WALHeaderSize) {
-      throw new Error(
+      throw new WALFormatError(
         `offset (${offset}) must be greater than the wal header size (${WALHeaderSize})`,
       );
     }
@@ -72,7 +73,7 @@ export class WALReader {
     // Ensure the offset is positioned on a frame start.
     const frameSize = r.pageSizeVal + WALFrameHeaderSize;
     if ((offset - WALHeaderSize) % frameSize !== 0) {
-      throw new Error(`unaligned wal offset ${offset} for page size ${r.pageSizeVal}`);
+      throw new WALFormatError(`unaligned wal offset ${offset} for page size ${r.pageSizeVal}`);
     }
     r.frameN = Math.floor((offset - WALHeaderSize) / frameSize);
 
@@ -185,7 +186,7 @@ export class WALReader {
     const magic = readU32BE(hdr, 0);
     if (magic === WALMagicLE) this.bo = 'le';
     else if (magic === WALMagicBE) this.bo = 'be';
-    else throw new Error(`invalid wal header magic: ${magic.toString(16)}`);
+    else throw new WALFormatError(`invalid wal header magic: ${magic.toString(16)}`);
 
     const chksum1 = readU32BE(hdr, 24);
     const chksum2 = readU32BE(hdr, 28);
@@ -196,7 +197,7 @@ export class WALReader {
 
     const version = readU32BE(hdr, 4);
     if (version !== WALVersion) {
-      throw new Error(`unsupported wal version: ${version}`);
+      throw new WALFormatError(`unsupported wal version: ${version}`);
     }
 
     this.pageSizeVal = readU32BE(hdr, 8);
@@ -209,7 +210,7 @@ export class WALReader {
 
   private readFrameInternal(data: Uint8Array, verifyChecksum: boolean): WALFrame {
     if (data.length !== this.pageSizeVal) {
-      throw new Error(
+      throw new WALFormatError(
         `buffer size (${data.length}) must match page size (${this.pageSizeVal})`,
       );
     }

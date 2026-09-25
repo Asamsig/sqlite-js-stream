@@ -258,6 +258,11 @@ on the specific subclass) instead of matching message text.
 | `ErrNoCompactionError` (`ErrNoCompaction`) | `ERR_NO_COMPACTION` | Nothing to compact (singleton; use `===`). |
 | `ErrCompactionTooEarlyError` (`ErrCompactionTooEarly`) | `ERR_COMPACTION_TOO_EARLY` | The level was already compacted this bucket (singleton). |
 | `FollowError` subclasses | `ERR_FOLLOW_*` | `follow()` resume/inconsistency failures (see [Replica.follow()](#replica-follow)). |
+| `LTXFormatError` | `ERR_LTX_FORMAT` | An LTX file is malformed/corrupt (decode/encode/parse/checksum). |
+| `WALFormatError` | `ERR_WAL_FORMAT` | A SQLite WAL file is malformed/corrupt. |
+| `ReplicaURLError` | `ERR_REPLICA_URL` | A replica URL is malformed or uses an unsupported scheme. |
+| `FileReplicaError` | `ERR_FILE_REPLICA` | A local file/backend replica operation failed. |
+| `DatabaseError` | `ERR_DATABASE` | A SQLite database file is missing/invalid or unreadable. |
 
 ---
 

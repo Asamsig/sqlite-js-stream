@@ -5,6 +5,7 @@
  */
 
 import { formatTXID } from './types.ts';
+import { LTXFormatError } from '../errors.ts';
 
 const FILENAME_RE = /^([0-9a-f]{16})-([0-9a-f]{16})\.ltx$/;
 
@@ -17,7 +18,7 @@ export function formatFilename(minTXID: bigint, maxTXID: bigint): string {
 export function parseFilename(name: string): { minTXID: bigint; maxTXID: bigint } {
   const m = FILENAME_RE.exec(name);
   if (m === null) {
-    throw new Error(`invalid ltx filename: ${name}`);
+    throw new LTXFormatError(`invalid ltx filename: ${name}`);
   }
   return {
     minTXID: BigInt(`0x${m[1]}`),

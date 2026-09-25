@@ -1,3 +1,4 @@
+import { LTXFormatError } from '../errors.ts';
 /**
  * LTX shared types and small value helpers.
  *
@@ -23,10 +24,10 @@ export function formatTXID(txID: bigint): string {
 /** Parses a 16-character hex string into a TXID. */
 export function parseTXID(s: string): bigint {
   if (s.length !== 16) {
-    throw new Error(`invalid formatted transaction id length: ${JSON.stringify(s)}`);
+    throw new LTXFormatError(`invalid formatted transaction id length: ${JSON.stringify(s)}`);
   }
   if (!/^[0-9a-fA-F]{16}$/.test(s)) {
-    throw new Error(`invalid transaction id format: ${JSON.stringify(s)}`);
+    throw new LTXFormatError(`invalid transaction id format: ${JSON.stringify(s)}`);
   }
   return BigInt(`0x${s}`);
 }
@@ -39,17 +40,17 @@ export function formatChecksum(chk: bigint): string {
 /** Parses a 16-character hex string into a Checksum. */
 export function parseChecksum(s: string): bigint {
   if (s.length !== 16) {
-    throw new Error(`invalid formatted checksum length: ${JSON.stringify(s)}`);
+    throw new LTXFormatError(`invalid formatted checksum length: ${JSON.stringify(s)}`);
   }
   if (!/^[0-9a-fA-F]{16}$/.test(s)) {
-    throw new Error(`invalid checksum format: ${JSON.stringify(s)}`);
+    throw new LTXFormatError(`invalid checksum format: ${JSON.stringify(s)}`);
   }
   return BigInt(`0x${s}`);
 }
 
 export function parsePos(s: string): Pos {
   if (s.length !== 33) {
-    throw new Error(`invalid formatted position length: ${JSON.stringify(s)}`);
+    throw new LTXFormatError(`invalid formatted position length: ${JSON.stringify(s)}`);
   }
   return {
     txID: parseTXID(s.slice(0, 16)),

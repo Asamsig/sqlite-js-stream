@@ -14,6 +14,7 @@
  */
 
 import { SnapshotLevel } from './constants.ts';
+import { InvalidArgumentError } from '../errors.ts';
 
 /** CompactionLevel describes a single compaction tier. */
 export interface CompactionLevel {
@@ -35,10 +36,10 @@ export class CompactionLevels {
   /** Returns the level configuration at `level`. */
   level(level: number): CompactionLevel {
     if (level === SnapshotLevel) {
-      throw new Error('snapshot level has no compaction interval');
+      throw new InvalidArgumentError('snapshot level has no compaction interval');
     }
     if (level < 0 || level > this.maxLevel()) {
-      throw new Error(`level out of bounds: ${level}`);
+      throw new InvalidArgumentError(`level out of bounds: ${level}`);
     }
     return this.levels[level];
   }
@@ -69,23 +70,23 @@ export class CompactionLevels {
   /** Validate checks the levels are ordered, bounded, and have sane intervals. */
   validate(): void {
     if (this.levels.length === 0) {
-      throw new Error('at least one compaction level is required');
+      throw new InvalidArgumentError('at least one compaction level is required');
     }
     for (let i = 0; i < this.levels.length; i++) {
       const lvl = this.levels[i];
       if (lvl.level !== i) {
-        throw new Error(
+        throw new InvalidArgumentError(
           `compaction level number out of order: ${lvl.level}, expected ${i}`,
         );
       }
       if (lvl.level > SnapshotLevel - 1) {
-        throw new Error(`compaction level cannot exceed ${SnapshotLevel - 1}`);
+        throw new InvalidArgumentError(`compaction level cannot exceed ${SnapshotLevel - 1}`);
       }
       if (lvl.level === 0 && lvl.intervalMs !== 0) {
-        throw new Error('cannot set interval on compaction level zero');
+        throw new InvalidArgumentError('cannot set interval on compaction level zero');
       }
       if (lvl.level !== 0 && lvl.intervalMs <= 0) {
-        throw new Error(`interval required for level ${lvl.level}`);
+        throw new InvalidArgumentError(`interval required for level ${lvl.level}`);
       }
     }
   }

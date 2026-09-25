@@ -9,6 +9,7 @@ import {
 } from './constants.ts';
 import { assertFull, readU64BE, writeU64BE } from './bytes.ts';
 import type { Header, Trailer } from './types.ts';
+import { LTXFormatError } from '../errors.ts';
 
 /** MarshalBinary encodes a Trailer to its 16-byte representation. */
 export function marshalTrailer(t: Trailer): Uint8Array {
@@ -35,22 +36,22 @@ function noChecksum(h: Header): boolean {
 export function validateTrailer(t: Trailer, h: Header): void {
   if (noChecksum(h)) {
     if (t.postApplyChecksum !== 0n) {
-      throw new Error('post-apply checksum not allowed');
+      throw new LTXFormatError('post-apply checksum not allowed');
     }
   } else {
     if (t.postApplyChecksum === 0n) {
-      throw new Error('post-apply checksum required');
+      throw new LTXFormatError('post-apply checksum required');
     }
     if ((t.postApplyChecksum & ChecksumFlag) === 0n) {
-      throw new Error('invalid post-apply checksum format');
+      throw new LTXFormatError('invalid post-apply checksum format');
     }
   }
 
   if (t.fileChecksum === 0n) {
-    throw new Error('file checksum required');
+    throw new LTXFormatError('file checksum required');
   }
   if ((t.fileChecksum & ChecksumFlag) === 0n) {
-    throw new Error('invalid file checksum format');
+    throw new LTXFormatError('invalid file checksum format');
   }
 }
 

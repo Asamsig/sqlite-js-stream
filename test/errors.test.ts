@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 
 import {
+  DatabaseError,
   ErrCompactionTooEarly,
   ErrCompactionTooEarlyError,
   ErrLeaseNotHeld,
   ErrNoCompaction,
   ErrNoCompactionError,
   FileReplicaClient,
+  FileReplicaError,
   FollowAheadOfLatestError,
   FollowDataGapError,
   FollowInvalidTxidError,
@@ -16,10 +18,13 @@ import {
   InvalidArgumentError,
   LeaseExistsError,
   LTXError,
+  LTXFormatError,
   NoMatchingBackupError,
   PageSizeMismatchError,
   Replica,
+  ReplicaURLError,
   SqliteJsStreamError,
+  WALFormatError,
 } from '../src/index.ts';
 import { makeTempDir } from './helpers/make-db.ts';
 
@@ -42,6 +47,11 @@ test('library error classes share the common base and carry .code/name', () => {
     { err: new FollowInvalidTxidError('x'), code: 'ERR_FOLLOW_INVALID_TXID', name: 'FollowInvalidTxidError' },
     { err: new FollowAheadOfLatestError('x'), code: 'ERR_FOLLOW_AHEAD_OF_LATEST', name: 'FollowAheadOfLatestError' },
     { err: new FollowDataGapError('x'), code: 'ERR_FOLLOW_OLDER_THAN_EARLIEST', name: 'FollowDataGapError' },
+    { err: new LTXFormatError('bad'), code: 'ERR_LTX_FORMAT', name: 'LTXFormatError' },
+    { err: new WALFormatError('bad'), code: 'ERR_WAL_FORMAT', name: 'WALFormatError' },
+    { err: new ReplicaURLError('bad'), code: 'ERR_REPLICA_URL', name: 'ReplicaURLError' },
+    { err: new FileReplicaError('bad'), code: 'ERR_FILE_REPLICA', name: 'FileReplicaError' },
+    { err: new DatabaseError('bad'), code: 'ERR_DATABASE', name: 'DatabaseError' },
   ];
 
   for (const { err, code, name } of cases) {

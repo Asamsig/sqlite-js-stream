@@ -12,6 +12,7 @@ import { assertFull, readU32BE, readU64BE, writeU32BE, writeU64BE } from './byte
 import type { Header } from './types.ts';
 import { isSnapshot } from './types.ts';
 import { lockPgno } from './constants.ts';
+import { LTXFormatError } from '../errors.ts';
 
 /**
  * MarshalBinary encodes a header to its 100-byte representation.
@@ -42,7 +43,7 @@ export function unmarshalHeader(b: Uint8Array): Header {
   assertFull(b, 0, HeaderSize);
   const magic = String.fromCharCode(b[0], b[1], b[2], b[3]);
   if (magic !== Magic) {
-    throw new Error('invalid LTX file');
+    throw new LTXFormatError('invalid LTX file');
   }
   return {
     version: Version,
@@ -68,54 +69,54 @@ function noChecksum(flags: number): boolean {
 /** Validate returns an error (thrown) if h is invalid. */
 export function validateHeader(h: Header): void {
   if (h.version !== Version) {
-    throw new Error('invalid version');
+    throw new LTXFormatError('invalid version');
   }
   if (!isValidHeaderFlags(h.flags)) {
-    throw new Error(`invalid flags: 0x${h.flags.toString(16)}`);
+    throw new LTXFormatError(`invalid flags: 0x${h.flags.toString(16)}`);
   }
   if (!isValidPageSize(h.pageSize)) {
-    throw new Error(`invalid page size: ${h.pageSize}`);
+    throw new LTXFormatError(`invalid page size: ${h.pageSize}`);
   }
   if (h.minTXID === 0n) {
-    throw new Error('minimum transaction id required');
+    throw new LTXFormatError('minimum transaction id required');
   }
   if (h.maxTXID === 0n) {
-    throw new Error('maximum transaction id required');
+    throw new LTXFormatError('maximum transaction id required');
   }
   if (h.minTXID > h.maxTXID) {
-    throw new Error(`transaction ids out of order: (${h.minTXID},${h.maxTXID})`);
+    throw new LTXFormatError(`transaction ids out of order: (${h.minTXID},${h.maxTXID})`);
   }
 
   if (h.walOffset < 0n) {
-    throw new Error(`wal offset cannot be negative: ${h.walOffset}`);
+    throw new LTXFormatError(`wal offset cannot be negative: ${h.walOffset}`);
   }
   if (h.walSize < 0n) {
-    throw new Error(`wal size cannot be negative: ${h.walSize}`);
+    throw new LTXFormatError(`wal size cannot be negative: ${h.walSize}`);
   }
 
   if ((h.walSalt1 !== 0 || h.walSalt2 !== 0) && h.walOffset === 0n) {
-    throw new Error('wal offset required if salt exists');
+    throw new LTXFormatError('wal offset required if salt exists');
   }
   if (h.walOffset === 0n && h.walSize !== 0n) {
-    throw new Error('wal offset required if wal size exists');
+    throw new LTXFormatError('wal offset required if wal size exists');
   }
 
   const snap = isSnapshot(h);
   const nc = noChecksum(h.flags);
   if (snap) {
     if (h.preApplyChecksum !== 0n) {
-      throw new Error('pre-apply checksum must be zero on snapshots');
+      throw new LTXFormatError('pre-apply checksum must be zero on snapshots');
     }
   } else if (nc) {
     if (h.preApplyChecksum !== 0n) {
-      throw new Error('pre-apply checksum not allowed');
+      throw new LTXFormatError('pre-apply checksum not allowed');
     }
   } else {
     if (h.preApplyChecksum === 0n) {
-      throw new Error('pre-apply checksum required on non-snapshot files');
+      throw new LTXFormatError('pre-apply checksum required on non-snapshot files');
     }
     if ((h.preApplyChecksum & ChecksumFlag) === 0n) {
-      throw new Error('invalid pre-apply checksum format');
+      throw new LTXFormatError('invalid pre-apply checksum format');
     }
   }
 }

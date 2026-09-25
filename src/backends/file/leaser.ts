@@ -19,6 +19,7 @@ import {
   LeaseExistsError,
   type Leaser,
 } from '../../leaser.ts';
+import { FileReplicaError } from '../../errors.ts';
 
 function sha256(data: Uint8Array): string {
   return createHash('sha256').update(data).digest('hex');
@@ -42,7 +43,7 @@ function decodeLease(data: Uint8Array, etag: string): Lease {
   };
   const expiresAt = Date.parse(parsed.expires_at ?? '');
   if (Number.isNaN(expiresAt)) {
-    throw new Error('invalid lease file: bad expires_at');
+    throw new FileReplicaError('invalid lease file: bad expires_at');
   }
   return new Lease(parsed.generation ?? 1, expiresAt, parsed.owner ?? '', etag);
 }

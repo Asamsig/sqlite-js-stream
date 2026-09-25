@@ -24,7 +24,7 @@ import {
   unmarshalHeader,
 } from './ltx/index.ts';
 import { ByteReader } from './ltx/index.ts';
-import { SqliteJsStreamError } from './errors.ts';
+import { LTXFormatError, SqliteJsStreamError } from './errors.ts';
 import { readU64BE } from './ltx/index.ts';
 import { readAll } from './util/stream.ts';
 import type { Logger } from './util/logger.ts';
@@ -185,7 +185,7 @@ export async function fetchPageIndexData(client: ReplicaClient, info: FileInfo):
   const b = await readAll(f);
 
   if (b.length < TrailerSize + 8) {
-    throw new Error(`ltx file too short to contain a page index: ${b.length} bytes`);
+    throw new LTXFormatError(`ltx file too short to contain a page index: ${b.length} bytes`);
   }
 
   const size = readU64BE(b, b.length - TrailerSize - 8);

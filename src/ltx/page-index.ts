@@ -9,6 +9,7 @@
 import { readU64BE } from './bytes.ts';
 import type { ByteReader } from './byte-reader.ts';
 import type { PageIndex, TXID } from './types.ts';
+import { LTXFormatError } from '../errors.ts';
 
 const MAX_INT64 = 0x7fffffffffffffffn;
 
@@ -36,14 +37,14 @@ export function readUvarint(r: ByteReader): bigint {
     const b = r.readByte();
     if (b < 0x80) {
       if (i === 9 && b > 1) {
-        throw new Error('uvarint overflows 64 bits');
+        throw new LTXFormatError('uvarint overflows 64 bits');
       }
       return x | (BigInt(b) << s);
     }
     x |= BigInt(b & 0x7f) << s;
     s += 7n;
   }
-  throw new Error('uvarint overflows 64 bits');
+  throw new LTXFormatError('uvarint overflows 64 bits');
 }
 
 /**
@@ -68,15 +69,15 @@ export function parsePageIndex(
       break;
     }
     if (pgno > 0xffffffffn) {
-      throw new Error(`page index pgno ${pgno} out of range`);
+      throw new LTXFormatError(`page index pgno ${pgno} out of range`);
     }
     if (pgno <= BigInt(prevPgno)) {
-      throw new Error(`page index out of order: ${pgno} after ${prevPgno}`);
+      throw new LTXFormatError(`page index out of order: ${pgno} after ${prevPgno}`);
     }
     const offset = readUvarint(r);
     const size = readUvarint(r);
     if (offset > MAX_INT64 || size > MAX_INT64) {
-      throw new Error(`page index pgno ${pgno} offset/size out of range`);
+      throw new LTXFormatError(`page index pgno ${pgno} offset/size out of range`);
     }
     observe?.(r.slice(start, r.pos));
     consumed += r.pos - start;
@@ -89,7 +90,7 @@ export function parsePageIndex(
   observe?.(sizeBuf);
   const indexSize = readU64BE(sizeBuf, 0);
   if (indexSize !== BigInt(consumed)) {
-    throw new Error(`page index size mismatch: field=${indexSize} read=${consumed}`);
+    throw new LTXFormatError(`page index size mismatch: field=${indexSize} read=${consumed}`);
   }
 }
 

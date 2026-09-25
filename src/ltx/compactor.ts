@@ -11,6 +11,7 @@ import { isZeroPageHeader, isContiguous } from './types.ts';
 import type { ByteSink } from './sink.ts';
 import { Encoder } from './encoder.ts';
 import { Decoder } from './decoder.ts';
+import { InvalidArgumentError, LTXFormatError, PageSizeMismatchError } from '../errors.ts';
 
 interface CompactorInput {
   dec: Decoder;
@@ -60,7 +61,7 @@ export class Compactor {
   /** Compact merges all input readers into a single LTX stream. */
   compact(): void {
     if (this.inputs.length === 0) {
-      throw new Error('at least one input reader required');
+      throw new InvalidArgumentError('at least one input reader required');
     }
 
     // Read headers from all inputs.
@@ -73,7 +74,7 @@ export class Compactor {
       const prevHdr = this.inputs[i - 1].dec.Header();
       const hdr = this.inputs[i].dec.Header();
       if (prevHdr.pageSize !== hdr.pageSize) {
-        throw new Error(
+        throw new PageSizeMismatchError(
           `input files have mismatched page sizes: ${prevHdr.pageSize} != ${hdr.pageSize}`,
         );
       }
@@ -81,7 +82,7 @@ export class Compactor {
         !this.allowNonContiguousTXIDs &&
         !isContiguous(prevHdr.maxTXID, hdr.minTXID, hdr.maxTXID)
       ) {
-        throw new Error(
+        throw new LTXFormatError(
           `non-contiguous transaction ids in input files: (${prevHdr.minTXID},${prevHdr.maxTXID}) -> (${hdr.minTXID},${hdr.maxTXID})`,
         );
       }

@@ -25,6 +25,7 @@ import { marshalPageHeader, validatePageHeader } from './page.ts';
 import { marshalTrailer, validateTrailer } from './trailer.ts';
 import { encodePageIndexRecord, encodeUvarint } from './page-index.ts';
 import { compressBlock } from './lz4.ts';
+import { LTXFormatError } from '../errors.ts';
 
 const stateHeader = 'header';
 const statePage = 'page';
@@ -82,9 +83,9 @@ export class Encoder {
 
   /** EncodeHeader writes the header frame and initializes the checksum. */
   encodeHeader(h: Header): void {
-    if (this.state === stateClosed) throw new Error('ltx encoder closed');
+    if (this.state === stateClosed) throw new LTXFormatError('ltx encoder closed');
     if (this.state !== stateHeader) {
-      throw new Error(`cannot encode header frame, expected ${this.state}`);
+      throw new LTXFormatError(`cannot encode header frame, expected ${this.state}`);
     }
     validateHeader(h);
     this.header = h;
@@ -98,47 +99,47 @@ export class Encoder {
    * size and `hdr.pgno` must be in ascending order and not the lock page.
    */
   encodePage(hdr: PageHeader, data: Uint8Array): void {
-    if (this.state === stateClosed) throw new Error('ltx encoder closed');
+    if (this.state === stateClosed) throw new LTXFormatError('ltx encoder closed');
     if (this.state !== statePage) {
-      throw new Error(`cannot encode page header, expected ${this.state}`);
+      throw new LTXFormatError(`cannot encode page header, expected ${this.state}`);
     }
     if (hdr.pgno > this.header.commit) {
-      throw new Error(
+      throw new LTXFormatError(
         `page number ${hdr.pgno} out-of-bounds for commit size ${this.header.commit}`,
       );
     }
     validatePageHeader(hdr);
     if (data.length !== this.header.pageSize) {
-      throw new Error(
+      throw new LTXFormatError(
         `invalid page buffer size: ${data.length}, expecting ${this.header.pageSize}`,
       );
     }
 
     const lockPg = lockPgno(this.header.pageSize);
     if (hdr.pgno === lockPg) {
-      throw new Error(`cannot encode lock page: pgno=${hdr.pgno}`);
+      throw new LTXFormatError(`cannot encode lock page: pgno=${hdr.pgno}`);
     }
 
     // Enforce page ordering.
     if (this.header.minTXID === 1n) {
       // Snapshot files must include all pages up to commit, in order.
       if (this.prevPgno === 0 && hdr.pgno !== 1) {
-        throw new Error('snapshot transaction file must start with page number 1');
+        throw new LTXFormatError('snapshot transaction file must start with page number 1');
       }
       if (this.prevPgno === lockPg - 1) {
         if (hdr.pgno !== this.prevPgno + 2) {
-          throw new Error(
+          throw new LTXFormatError(
             `nonsequential page numbers in snapshot transaction (skip lock page): ${this.prevPgno},${hdr.pgno}`,
           );
         }
       } else if (this.prevPgno !== 0 && hdr.pgno !== this.prevPgno + 1) {
-        throw new Error(
+        throw new LTXFormatError(
           `nonsequential page numbers in snapshot transaction: ${this.prevPgno},${hdr.pgno}`,
         );
       }
     } else {
       if (this.prevPgno >= hdr.pgno) {
-        throw new Error(`out-of-order page numbers: ${this.prevPgno},${hdr.pgno}`);
+        throw new LTXFormatError(`out-of-order page numbers: ${this.prevPgno},${hdr.pgno}`);
       }
     }
 
@@ -161,7 +162,7 @@ export class Encoder {
   close(): void {
     if (this.state === stateClosed) return;
     if (this.state !== statePage) {
-      throw new Error(`cannot close, expected ${this.state}`);
+      throw new LTXFormatError(`cannot close, expected ${this.state}`);
     }
 
     // Empty page header terminates the page block.

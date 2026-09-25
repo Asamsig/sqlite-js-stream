@@ -32,6 +32,7 @@ import { decompressBlockInto } from './lz4.ts';
 import { checksumPage } from './checksum.ts';
 import type { Header, PageHeader, Trailer } from './types.ts';
 import { isSnapshot } from './types.ts';
+import { LTXFormatError } from '../errors.ts';
 
 const stateHeader = 'header';
 const statePage = 'page';
@@ -74,7 +75,7 @@ export class AsyncByteReader {
     let o = 0;
     while (o < n) {
       if (this.bufPos >= this.buf.length) {
-        if (!(await this.fill())) throw new Error('unexpected end of input');
+        if (!(await this.fill())) throw new LTXFormatError('unexpected end of input');
       }
       const take = Math.min(n - o, this.buf.length - this.bufPos);
       out.set(this.buf.subarray(this.bufPos, this.bufPos + take), o);
@@ -148,9 +149,9 @@ export class StreamLtxReader {
 
   /** Reads and validates the LTX header frame. */
   async readHeader(): Promise<void> {
-    if (this.state === stateClosed) throw new Error('ltx reader closed');
+    if (this.state === stateClosed) throw new LTXFormatError('ltx reader closed');
     if (this.state !== stateHeader) {
-      throw new Error(`cannot read header, expected ${this.state}`);
+      throw new LTXFormatError(`cannot read header, expected ${this.state}`);
     }
     const b = await this.r.readFull(HeaderSize);
     this.header = unmarshalHeader(b);
@@ -165,13 +166,13 @@ export class StreamLtxReader {
    * when the end-of-pages marker is reached.
    */
   async readPage(data: Uint8Array): Promise<PageHeader | null> {
-    if (this.state === stateClosed) throw new Error('ltx reader closed');
+    if (this.state === stateClosed) throw new LTXFormatError('ltx reader closed');
     if (this.state === stateClose) return null;
     if (this.state !== statePage) {
-      throw new Error(`cannot read page header, expected ${this.state}`);
+      throw new LTXFormatError(`cannot read page header, expected ${this.state}`);
     }
     if (data.length !== this.header.pageSize) {
-      throw new Error(`invalid page buffer size: ${data.length}, expecting ${this.header.pageSize}`);
+      throw new LTXFormatError(`invalid page buffer size: ${data.length}, expecting ${this.header.pageSize}`);
     }
 
     const b = await this.r.readFull(PageHeaderSize);
@@ -185,7 +186,7 @@ export class StreamLtxReader {
     }
 
     if (hdr.pgno > this.header.commit) {
-      throw new Error(`page number ${hdr.pgno} out-of-bounds for commit size ${this.header.commit}`);
+      throw new LTXFormatError(`page number ${hdr.pgno} out-of-bounds for commit size ${this.header.commit}`);
     }
 
     if (hdr.flags & PageHeaderFlagSize) {
@@ -195,10 +196,10 @@ export class StreamLtxReader {
       const compressed = await this.r.readFull(dataSize);
       const n = decompressBlockInto(compressed, data);
       if (n !== this.header.pageSize) {
-        throw new Error(`lz4 block decompressed to ${n} bytes, expected ${this.header.pageSize}`);
+        throw new LTXFormatError(`lz4 block decompressed to ${n} bytes, expected ${this.header.pageSize}`);
       }
     } else {
-      throw new Error('legacy LZ4 frame format not supported');
+      throw new LTXFormatError('legacy LZ4 frame format not supported');
     }
 
     this.hash.update(data);
@@ -219,7 +220,7 @@ export class StreamLtxReader {
   async verify(): Promise<void> {
     if (this.state === stateClosed) return;
     if (this.state !== stateClose) {
-      throw new Error(`cannot verify, expected ${this.state}`);
+      throw new LTXFormatError(`cannot verify, expected ${this.state}`);
     }
 
     const remaining = await this.r.readAllRemaining();
@@ -233,15 +234,15 @@ export class StreamLtxReader {
       (buf) => this.hash.update(buf),
       (pgno, offset, size) => {
         if (pgno > this.header.commit) {
-          throw new Error(`page index pgno ${pgno} exceeds commit ${this.header.commit}`);
+          throw new LTXFormatError(`page index pgno ${pgno} exceeds commit ${this.header.commit}`);
         }
         if (offset < nextOffset) {
-          throw new Error(
+          throw new LTXFormatError(
             `page index pgno ${pgno} offset ${offset} overlaps previous frame ending at ${nextOffset}`,
           );
         }
         if (size <= PageHeaderSize) {
-          throw new Error(`page index pgno ${pgno} has invalid frame size ${size}`);
+          throw new LTXFormatError(`page index pgno ${pgno} has invalid frame size ${size}`);
         }
         nextOffset = offset + size;
         n++;
@@ -250,27 +251,27 @@ export class StreamLtxReader {
     );
 
     if (n !== this.pageN) {
-      throw new Error(`page index has ${n} entries but ${this.pageN} pages were decoded`);
+      throw new LTXFormatError(`page index has ${n} entries but ${this.pageN} pages were decoded`);
     }
     if (seq.sum64() !== this.pageSeq.sum64()) {
-      throw new Error('page index does not match the decoded page numbers');
+      throw new LTXFormatError('page index does not match the decoded page numbers');
     }
 
     const t = br.readFull(TrailerSize);
     this.hash.update(t.subarray(0, TrailerChecksumOffset));
     this.trailer = unmarshalTrailer(t);
     if (br.remaining > 0) {
-      throw new Error('unexpected data after trailer');
+      throw new LTXFormatError('unexpected data after trailer');
     }
 
     const computed = ChecksumFlag | this.hash.sum64();
     if (computed !== this.trailer.fileChecksum) {
-      throw new Error('file checksum mismatch');
+      throw new LTXFormatError('file checksum mismatch');
     }
 
     if (isSnapshot(this.header) && !noChecksum(this.header)) {
       if (this.trailer.postApplyChecksum !== this.chksum) {
-        throw new Error(
+        throw new LTXFormatError(
           `post-apply checksum in trailer (${this.trailer.postApplyChecksum.toString(16)}) does not match calculated checksum (${this.chksum.toString(16)})`,
         );
       }

@@ -4,6 +4,7 @@
  */
 
 import { assertFull } from './bytes.ts';
+import { LTXFormatError } from '../errors.ts';
 
 export class ByteReader {
   private buf: Uint8Array;
@@ -25,7 +26,7 @@ export class ByteReader {
   /** Reads one byte, advancing the position. Throws on EOF. */
   readByte(): number {
     if (this.pos >= this.buf.length) {
-      throw new Error('unexpected end of input');
+      throw new LTXFormatError('unexpected end of input');
     }
     return this.buf[this.pos++];
   }
