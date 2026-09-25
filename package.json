@@ -23,6 +23,8 @@
   "scripts": {
     "test": "node --test 'test/**/*.test.ts'",
     "typecheck": "tsc -p . --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "test:all": "pnpm test && pnpm -r test",
     "typecheck:all": "pnpm typecheck",
     "bench": "node bench/bench-sync-restore.ts"
@@ -31,8 +33,10 @@
     "lz4js": "^0.2.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "@types/node": "^24.0.0"
+    "@types/node": "^24.0.0",
+    "eslint": "^9.39.5",
+    "neostandard": "^0.13.0",
+    "typescript": "^5.7.0"
   },
   "keywords": [
     "sqlite",

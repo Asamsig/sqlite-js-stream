@@ -36,5 +36,8 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck:all
 
+      - name: Lint (ESLint + neostandard, type-stripping guard)
+        run: pnpm lint
+
       - name: Run tests
         run: pnpm test:all

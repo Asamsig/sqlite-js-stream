@@ -688,7 +688,7 @@ export class Replica {
 
       const base = await openReader(plan[0]);
       await base.readHeader();
-      let pageSize = base.Header().pageSize;
+      const pageSize = base.Header().pageSize;
       let commit = base.Header().commit;
       await writeSnapshotToFile(fh, base, pageSize, commit);
       await base.verify();
