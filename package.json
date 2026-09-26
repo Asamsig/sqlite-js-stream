@@ -41,6 +41,7 @@
   },
   "scripts": {
     "test": "node --test 'test/**/*.test.ts'",
+    "pretypecheck": "pnpm build",
     "typecheck": "tsc -p . --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

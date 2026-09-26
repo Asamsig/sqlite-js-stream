@@ -23,6 +23,10 @@ testdata/local/
 npm-debug.log*
 *.tgz
 
+# Stray/transpiled output (tsc emits to dist/, not src/)
+src/**/*.js
+src/**/*.d.ts.map
+
 # Environment
 .env
 .env.*
