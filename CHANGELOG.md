@@ -4,6 +4,15 @@ All notable changes to `@platformatic/sqlite-js-stream` are documented here. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `compressBlock` is now a byte-identical TypeScript port of Go's
+  `pierrec/lz4/v4` Fast block compressor, so LTX files we write match Go's
+  `superfly/ltx` encoder exactly (validated against the Go goldens in CI's
+  `interop-go` job). `lz4js` is retained only for LZ4 block decompression.
+
 ## [0.1.0] - 2025-01-01
 
 ### Added

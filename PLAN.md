@@ -58,12 +58,13 @@ Verified on Node `v24.21.0`.
 > (`no-restricted-syntax` rejecting `enum`, parameter properties, `namespace`/`module`, and
 > `import x = require(...)`) and a `require-ts-extension` rule.
 
-> **Interop note (Milestone 1):** Go's `superfly/ltx` golden file-checksum vectors
-> (`0xe27f4c18f0da2c10`, `0xd926967672f7ca53`) are pinned in `test/ltx/golden.test.ts`. Our `lz4js`
-> produces *valid* but not *byte-identical* LZ4 block bytes to Go's `pierrec/lz4/v4`, so our file
-> checksums differ. LZ4 block **decompression is fully interoperable** (files we write are readable by
-> Go and vice-versa); only byte-identical encoding requires a liblz4-compatible codec. Validate Go
-> byte-parity in CI with Go goldens if we later switch to `lz4-napi`/WASM liblz4.
+> **Interop note (Milestone 1):** Our `compressBlock` is a byte-identical TypeScript port of Go's
+> `pierrec/lz4/v4` Fast block compressor, so the LTX files we write match Go's `superfly/ltx` encoder
+> exactly. The canonical Go golden file-checksum vectors
+> (`0xf61cfb1887ed139e`, `0x8433a627b12d0fd4`) are pinned in `test/ltx/golden.test.ts` and are
+> re-encoded byte-for-byte in `test/ltx/go-interop.test.ts`, so any drift in our encoder, decoder, or
+> the Go format is caught by the `interop-go` CI job. `lz4js` is retained only for LZ4 block
+> **decompression** (which need not be byte-identical).
 
 ---
 

@@ -19,7 +19,8 @@ replica (S3, a local directory, etc.), and can **restore** a database from those
 ## Requirements
 
 - **Node.js `>= 24`** — required for native `.ts` type stripping (dev/test) and the built-in `node:sqlite`.
-- Runtime dependency: `lz4js` (pure-JS LZ4 **block** codec, matching the LTX format).
+- Runtime dependency: `lz4js` (pure-JS LZ4 **block** decoder), matching the LTX format.
+  Compression is a byte-identical TypeScript port of Go's `pierrec/lz4/v4` Fast block compressor.
 
 During development we run the `.ts` source directly under Node's type stripping
 (no dev build). The **published** package ships transpiled `.js` plus `.d.ts`

@@ -284,9 +284,10 @@ on the specific subclass) instead of matching message text.
   whole DB/WAL. `restore()` streams pages into the output DB rather than buffering every LTX file. The
   S3 addon uploads objects larger than 5 MiB with the multipart API so the upload is never buffered
   either. The WAL is still read in full (it is small relative to the database).
-- LZ4 uses `lz4js` (pure JS **block** format), which is interoperable for **decompression** but not
-  byte-identical to Go's `pierrec/lz4/v4`. Files written here are readable by Litestream and
-  vice-versa.
+- LZ4 **compression** is a byte-identical TypeScript port of Go's `pierrec/lz4/v4` Fast block
+  compressor, so files we write match Go's `superfly/ltx` encoder exactly (validated against the Go
+  goldens in CI's `interop-go` job). `lz4js` is retained only for LZ4 block **decompression**, which
+  need not be byte-identical.
 - **Write format is modern LTX.** We write `superfly/ltx v0.5.2` LTX files with compaction levels
   0..9 (snapshots at level 9) under `ltx/{level}/{min}-{max}.ltx`, exactly matching current
   litestream. We deliberately do **not** read legacy v0.3.x generation backups
