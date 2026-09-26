@@ -41,7 +41,7 @@ import {
   type OpenLTXFileOptions,
   type ReplicaClient,
   type WriteLTXFileOptions,
-} from 'sqlite-js-stream';
+} from '@platformatic/sqlite-js-stream';
 
 /** The strategy identifier reported by {@link S3ReplicaClient.type}. */
 export const ReplicaClientType = 's3';

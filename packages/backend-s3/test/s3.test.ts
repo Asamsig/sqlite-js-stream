@@ -10,7 +10,7 @@ import {
   marshalHeader,
   newReplicaClientFromURL,
   type Header,
-} from 'sqlite-js-stream';
+} from '@platformatic/sqlite-js-stream';
 
 import {
   S3ReplicaClient,

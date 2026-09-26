@@ -1,5 +1,5 @@
 /**
- * sqlite-js-stream-backend-s3 — Amazon S3 upload strategy.
+ * @platformatic/sqlite-js-stream-s3 — Amazon S3 upload strategy.
  *
  * Importing this module registers the `s3` scheme with the core's replica URL
  * factory, so `newReplicaClientFromURL('s3://bucket/prefix')` resolves after
@@ -16,7 +16,7 @@ export {
 
 export { S3Leaser } from './leaser.ts';
 
-import { registerReplicaClientFactory } from 'sqlite-js-stream';
+import { registerReplicaClientFactory } from '@platformatic/sqlite-js-stream';
 import { newReplicaClientFromURL } from './replica-client.ts';
 
 // Register the 's3' URL scheme when the addon is imported.

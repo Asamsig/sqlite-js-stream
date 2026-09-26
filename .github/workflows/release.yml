@@ -1,0 +1,47 @@
+name: Release
+
+# Publish both workspace packages to npm on a `v*` tag, with provenance and
+# public access. The root package (@platformatic/sqlite-js-stream) is published
+# first (it is a dependency of the S3 addon); pnpm orders this automatically.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck:all
+
+      - name: Lint (ESLint + neostandard, type-stripping guard)
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test:all
+
+      - name: Publish packages (provenance + public)
+        run: pnpm -r publish --provenance --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

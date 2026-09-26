@@ -19,7 +19,7 @@ import {
   Lease,
   LeaseExistsError,
   type Leaser,
-} from 'sqlite-js-stream';
+} from '@platformatic/sqlite-js-stream';
 
 import type { S3ClientLike } from './replica-client.ts';
 

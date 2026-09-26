@@ -49,6 +49,15 @@ Verified on Node `v24.21.0`.
 > **follow-restore** (`Replica.follow()`), and a typed-error convention (`SqliteJsStreamError` + `.code`).
 > Test suite: **130 tests (112 core + 18 S3)**, green on Node 24 & 26.
 
+> **Publishing + linting completed:** packages are scoped to `@platformatic/*` and published from a
+> **type-stripping build pipeline** — `tsc` transpiles `src/*.ts` → `dist/*.js` (types erased) plus
+> `dist/*.d.ts` declarations, with relative specifiers rewritten to `.js` for consumers. This is
+> required because Node refuses to type-strip `.ts` files under `node_modules`. Dev/test still run
+> `.ts` directly via native type stripping. A release workflow publishes with `--provenance`. Linting
+> uses **ESLint + neostandard** (`ts: true`) as the baseline plus a type-stripping guard
+> (`no-restricted-syntax` rejecting `enum`, parameter properties, `namespace`/`module`, and
+> `import x = require(...)`) and a `require-ts-extension` rule.
+
 > **Interop note (Milestone 1):** Go's `superfly/ltx` golden file-checksum vectors
 > (`0xe27f4c18f0da2c10`, `0xd926967672f7ca53`) are pinned in `test/ltx/golden.test.ts`. Our `lz4js`
 > produces *valid* but not *byte-identical* LZ4 block bytes to Go's `pierrec/lz4/v4`, so our file
@@ -337,7 +346,7 @@ import {
   newReplicaClientFromURL, registerReplicaClientFactory,
   ReplicaClient, CompactionLevels, defaultCompactionLevels, calcRestorePlan,
   VERSION,
-} from 'sqlite-js-stream'
+} from '@platformatic/sqlite-js-stream'
 
 // File-backed replica: `path` is the SQLite DB; the client is a storage backend.
 const client = new FileReplicaClient('/data/repl')
@@ -568,8 +577,10 @@ backups.
    test to lock this in.
 5. **TXID/position persistence.** ✅ **resolved** – position is derived from local L0 LTX headers (no separate pos
    file). Ensure we reconstruct `WALOffset`/salts on restart exactly.
-6. **Type stripping limits.** No `enum`/decorators/parameter properties; use `import type`; explicit
-   `.ts` extensions. Add a lint guard (eslint rule or tsconfig) to prevent violations.
+6. **Type stripping limits.** ✅ **resolved** — no `enum`/decorators/parameter properties; use `import type`;
+   explicit `.ts` extensions. Guarded by **ESLint + neostandard** (`no-restricted-syntax` rejecting `enum`,
+   parameter properties, `namespace`/`module`, `import x = require(...)`) plus a `require-ts-extension` rule.
+   Note Node will not type-strip `.ts` under `node_modules`, so the published package ships transpiled `.js` + `.d.ts`.
 7. **Memory/perf on large DBs.** ✅ **resolved** – **streaming implemented (post-MVP).** `restore()` streams each
    LTX file page-by-page into the output DB (snapshot base + incremental overlay) and
    `sync()`/`snapshot()` read pages from a file handle and stream the encoded LTX straight to disk
@@ -615,7 +626,7 @@ backups.
 
 ## 11. Definition of done for MVP (Milestones 0–4)
 
-- [x] `npm test` green (128 tests: 110 core + 18 S3); `tsc --noEmit` clean.
+- [x] `npm test` green (130 tests: 112 core + 18 S3); `tsc --noEmit` clean; `eslint .` clean.
 - [x] LTX encoder/decoder pass round-trip + golden + checksum-verification tests.
 - [x] WAL reader parses real `node:sqlite` WAL files, `pageMap` correct.
 - [x] `FileReplicaClient` writes/reads/deletes in the correct directory layout.

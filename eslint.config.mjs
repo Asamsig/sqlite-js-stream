@@ -48,7 +48,7 @@ export default [
     semi: true,
     noStyle: true,
     env: ['node'],
-    ignores: ['dist/**', 'coverage/**'],
+    ignores: ['**/dist/**', '**/coverage/**', '.git/**', 'node_modules/**'],
   }),
   {
     // The type-stripping guard only applies to real `.ts` source, not to

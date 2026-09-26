@@ -1,5 +1,5 @@
 {
-  "name": "sqlite-js-stream",
+  "name": "@platformatic/sqlite-js-stream",
   "version": "0.1.0",
   "description": "Node.js port of Litestream: SQLite streaming replication & disaster recovery via LTX files",
   "type": "module",
@@ -17,14 +17,36 @@
   "bugs": {
     "url": "https://github.com/platformatic/sqlite-js-stream/issues"
   },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "scripts": {
     "test": "node --test 'test/**/*.test.ts'",
     "typecheck": "tsc -p . --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "build": "tsc -p tsconfig.build.json && node scripts/rewrite-dts.mjs dist",
+    "prepack": "pnpm build",
+    "pretest:all": "pnpm build",
     "test:all": "pnpm test && pnpm -r test",
     "typecheck:all": "pnpm typecheck",
     "bench": "node bench/bench-sync-restore.ts"

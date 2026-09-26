@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 
 import { S3Leaser } from '../src/leaser.ts';
-import { ErrLeaseNotHeld, LeaseExistsError } from 'sqlite-js-stream';
+import { ErrLeaseNotHeld, LeaseExistsError } from '@platformatic/sqlite-js-stream';
 import { MemoryS3 } from './helpers/memory-s3.ts';
 
 describe('S3Leaser', () => {

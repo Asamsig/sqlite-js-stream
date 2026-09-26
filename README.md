@@ -18,10 +18,13 @@ replica (S3, a local directory, etc.), and can **restore** a database from those
 
 ## Requirements
 
-- **Node.js `>= 24`** — required for native `.ts` type stripping and the built-in `node:sqlite`.
+- **Node.js `>= 24`** — required for native `.ts` type stripping (dev/test) and the built-in `node:sqlite`.
 - Runtime dependency: `lz4js` (pure-JS LZ4 **block** codec, matching the LTX format).
 
-No build step. Test files and source run directly under Node.
+During development we run the `.ts` source directly under Node's type stripping
+(no dev build). The **published** package ships transpiled `.js` plus `.d.ts`
+declarations — Node will not type-strip `.ts` files inside `node_modules`, so the
+tarball is built at publish time via `pnpm build` (see below).
 
 ---
 
@@ -32,24 +35,26 @@ upload strategies (replica backends) live under `packages/`:
 
 ```bash
 pnpm install       # link the workspace
+pnpm build         # transpile src -> dist (.js + .d.ts), used by addons/tests
 ```
 
-There is no build step: we run TypeScript directly via Node's native type
-stripping.
-
-The core package is published as `sqlite-js-stream` *(not yet published; install
-from the repository)*, and each addon is a separate package:
+The core package is published as **`@platformatic/sqlite-js-stream`** and the S3
+addon as **`@platformatic/sqlite-js-stream-s3`**:
 
 ```bash
-pnpm add sqlite-js-stream sqlite-js-stream-backend-s3
+pnpm add @platformatic/sqlite-js-stream
+pnpm add @platformatic/sqlite-js-stream-s3  # optional addon
 ```
+
+Importing the addon registers the `s3` URL scheme with
+`newReplicaClientFromURL('s3://bucket/prefix')`.
 
 ---
 
 ## Quick start
 
 ```ts
-import { Replica, FileReplicaClient } from 'sqlite-js-stream';
+import { Replica, FileReplicaClient } from '@platformatic/sqlite-js-stream';
 
 // 1. Point the replica at your database path and a replica destination.
 //    The library reads the database + `-wal` directly and is agnostic to
@@ -119,7 +124,7 @@ await replica.ensureExists();
 ### Manage many databases
 
 ```ts
-import { Store } from 'sqlite-js-stream';
+import { Store } from '@platformatic/sqlite-js-stream';
 
 const store = new Store();
 await store.openDB('/data/a.db', new FileReplicaClient('/data/replica-a'));
@@ -136,7 +141,7 @@ store.close();
 Replica clients are created from URLs via the factory registry:
 
 ```ts
-import { newReplicaClientFromURL, Replica } from 'sqlite-js-stream';
+import { newReplicaClientFromURL, Replica } from '@platformatic/sqlite-js-stream';
 
 const client = newReplicaClientFromURL('file:///data/replica');
 const replica = new Replica('/data/app.db', client);
@@ -147,12 +152,12 @@ registered by importing the matching addon (see below).
 
 ### S3 upload strategy
 
-The `sqlite-js-stream-backend-s3` addon provides an S3 replica client. Import it
+The `@platformatic/sqlite-js-stream-s3` addon provides an S3 replica client. Import it
 once to register the `s3://` scheme, then create clients from URLs or directly:
 
 ```ts
-import { Replica, newReplicaClientFromURL } from 'sqlite-js-stream';
-import { S3ReplicaClient } from 'sqlite-js-stream-backend-s3';
+import { Replica, newReplicaClientFromURL } from '@platformatic/sqlite-js-stream';
+import { S3ReplicaClient } from '@platformatic/sqlite-js-stream-s3';
 
 // Via a URL (bucket from the host, prefix from the path).
 const client = newReplicaClientFromURL('s3://my-bucket/backup?region=us-east-1');
@@ -186,7 +191,7 @@ interval until the supplied `AbortSignal` is aborted. Sync errors are logged and
 loop keeps going, so a transient failure doesn't stop replication:
 
 ```ts
-import { Replica, FileReplicaClient } from 'sqlite-js-stream';
+import { Replica, FileReplicaClient } from '@platformatic/sqlite-js-stream';
 
 const replica = new Replica('/data/app.db', new FileReplicaClient('/data/replica'));
 const ac = new AbortController();
@@ -222,7 +227,7 @@ thread on its own connection. Only the **path**s need to cross threads.
 
 ```ts
 import { parentPort } from 'node:worker_threads';
-import { Replica, FileReplicaClient } from 'sqlite-js-stream';
+import { Replica, FileReplicaClient } from '@platformatic/sqlite-js-stream';
 
 parentPort.on('message', async (msg) => {
   if (msg?.type !== 'start') return;
@@ -360,7 +365,7 @@ const result = await replica.enforceRetention({
 every replica.
 
 ```ts
-import { CompactionLevels } from 'sqlite-js-stream';
+import { CompactionLevels } from '@platformatic/sqlite-js-stream';
 
 // Each level is compacted at most once per wall-clock bucket (L1 every 30s,
 // L2 every 5m, L3 every 1h) — mirrors litestream's per-level pacing.
@@ -396,7 +401,7 @@ the others become idle **followers** that poll until the lease is free. Storage 
 lease ownership, so a secondary can never split the brain.
 
 ```ts
-import { FileLeaser } from 'sqlite-js-stream';
+import { FileLeaser } from '@platformatic/sqlite-js-stream';
 
 replica.leaser = new FileLeaser('/data/replica'); // becomes primary if the lease is free
 await replica.run({ intervalMs: 1000, signal });
@@ -408,7 +413,7 @@ if (replica.isPrimary()) {
 ```
 
 The file backend uses an exclusive-create lease with a content-hash token; the S3 addon
-(`import { S3Leaser } from 'sqlite-js-stream-backend-s3'`) uses S3 `If-None-Match`/`If-Match`
+(`import { S3Leaser } from '@platformatic/sqlite-js-stream-s3'`) uses S3 `If-None-Match`/`If-Match`
 conditional writes so racy acquirers cannot both win.
 
 ### ⚠️ This is a backup tool, not a distributed database

@@ -21,6 +21,7 @@ testdata/local/
 .DS_Store
 *.log
 npm-debug.log*
+*.tgz
 
 # Environment
 .env

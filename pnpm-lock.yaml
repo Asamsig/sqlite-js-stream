@@ -188,7 +188,7 @@ importers:
       '@aws-sdk/client-s3':
         specifier: ^3.1135.0
         version: 3.1135.0
-      sqlite-js-stream:
+      '@platformatic/sqlite-js-stream':
         specifier: workspace:*
         version: link:../..
     devDependencies:
