@@ -47,7 +47,7 @@ Verified on Node `v24.21.0`.
 > (L0→…→L9 with litestream-style time-bucketed scheduling), a **pnpm monorepo** with an **S3 addon**
 > (`packages/backend-s3`), distributed **leasing** (`lock.json` conditional writes), and continuous
 > **follow-restore** (`Replica.follow()`), and a typed-error convention (`SqliteJsStreamError` + `.code`).
-> Test suite: **130 tests (112 core + 18 S3)**, green on Node 24 & 26.
+> Test suite: **132 tests (114 core + 18 S3)**, green on Node 24 & 26.
 
 > **Publishing + linting completed:** packages are scoped to `@platformatic/*` and published from a
 > **type-stripping build pipeline** — `tsc` transpiles `src/*.ts` → `dist/*.js` (types erased) plus
@@ -566,9 +566,12 @@ backups.
    can, we fall back to **reading WAL before SQLite checkpoints** opportunistically and only
    truncating after we've synced (matching litestream's `checkpoint` ordering) plus accepting a
    snapshot window.
-2. **Golden interoperability.** Go is not installed in the dev environment. We hand-derive fixtures
-   and add a Go golden generator for CI. Until goldens are committed, interop is validated by
-   round-trip + spec conformance only.
+2. **Golden interoperability.** ✅ **resolved** — `tools/golden/main.go` generates canonical
+   `superfly/ltx` (v0.5.3) LTX fixtures into `testdata/go/`, and `test/ltx/go-interop.test.ts` decodes
+   them with our TS decoder (header, pages, page index, trailer, LZ4 block decompression, CRC-64 ISO
+   file + post-apply checksums). The `interop-go` CI job regenerates the fixtures and fails if they
+   drift (`git diff --exit-code -- testdata/go`). Because `lz4js` emits valid-but-not-byte-identical LZ4
+   blocks, this verifies the **decode** direction plus the checksum algorithms, not byte-identical encode.
 3. **LZ4 block format.** ✅ **resolved** — we use pure-JS `lz4js` (block format). `lz4js`
    **decodes** Go-produced bytes correctly, so decompression interop is guaranteed; only
    byte-identical *encoding* would require a liblz4-compatible codec (`lz4-napi`/WASM), which is an
@@ -626,7 +629,7 @@ backups.
 
 ## 11. Definition of done for MVP (Milestones 0–4)
 
-- [x] `npm test` green (130 tests: 112 core + 18 S3); `tsc --noEmit` clean; `eslint .` clean.
+- [x] `npm test` green (132 tests: 114 core + 18 S3); `tsc --noEmit` clean; `eslint .` clean.
 - [x] LTX encoder/decoder pass round-trip + golden + checksum-verification tests.
 - [x] WAL reader parses real `node:sqlite` WAL files, `pageMap` correct.
 - [x] `FileReplicaClient` writes/reads/deletes in the correct directory layout.

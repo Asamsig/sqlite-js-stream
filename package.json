@@ -47,6 +47,7 @@
     "lint:fix": "eslint . --fix",
     "build": "tsc -p tsconfig.build.json && node scripts/rewrite-dts.mjs dist",
     "prepack": "pnpm build",
+    "golden:go": "cd tools/golden && go run .",
     "pretest:all": "pnpm build",
     "test:all": "pnpm test && pnpm -r test",
     "typecheck:all": "pnpm typecheck",
