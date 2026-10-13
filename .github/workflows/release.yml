@@ -1,20 +1,33 @@
-name: Release
+name: Publish release
 
-# Publish both workspace packages to npm on a `v*` tag, with provenance and
-# public access. The root package (@platformatic/sqlite-js-stream) is published
-# first (it is a dependency of the S3 addon); pnpm orders this automatically.
+# Manually triggered release. Bumps every workspace package to the same
+# version, pushes the bump commit, publishes to npm via OIDC trusted
+# publishing (no NPM_TOKEN) and creates the GitHub release.
+#
+# Publishing is only possible from the `main` environment, which is
+# restricted to the `main` branch; the npm trusted publisher configuration
+# for each package must reference this workflow and that environment.
 on:
-  push:
-    tags:
-      - 'v*'
-
-permissions:
-  contents: read
-  id-token: write
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number or patch, minor, major'
+        required: true
+        type: string
+      prerelease:
+        description: 'Release as pre-release'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
-  release:
+  release-npm:
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      id-token: write
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -41,7 +54,36 @@ jobs:
       - name: Test
         run: pnpm test:all
 
-      - name: Publish packages (provenance + public)
-        run: pnpm -r publish --provenance --no-git-checks
+      - name: Bump version
+        id: bump
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          node scripts/bump-version.mjs "$VERSION_INPUT" "$GITHUB_ACTOR"
+          version=$(node -p "require('./package.json').version")
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Push changes
+        run: git push origin HEAD:${{ github.ref }}
+
+      - name: Publish packages to npm (OIDC + provenance)
+        run: pnpm -r publish --access public --tag ${{ inputs.prerelease == true && 'next' || 'latest' }} --provenance --publish-branch ${{ github.ref_name }} --no-git-checks
+
+      - name: Create draft release notes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          pnpx @matteo.collina/release-notes -t "v$RELEASE_VERSION" -r sqlite-js-stream -o platformatic -d ${{ inputs.prerelease == true && '-p' || '' }} -c "$(git rev-parse HEAD)"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          if [ "$PRERELEASE" = 'true' ]; then
+            gh release edit "v$RELEASE_VERSION" --draft=false
+          else
+            gh release edit "v$RELEASE_VERSION" --draft=false --latest
+          fi
