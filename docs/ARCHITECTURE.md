@@ -4,8 +4,8 @@
 (Apache-2.0). Describes the Node.js/TypeScript port in `sqlite-js-stream`.*
 
 This document explains how `sqlite-js-stream` replicates a SQLite database. It is the high-level
-design; see [`LTX_FORMAT.md`](LTX_FORMAT.md) for the on-disk format and [`PLAN.md`](../PLAN.md) for
-the milestone status.
+design; see [`LTX_FORMAT.md`](LTX_FORMAT.md) for the on-disk format and the
+[`README`](../README.md) for the project status and roadmap.
 
 ---
 

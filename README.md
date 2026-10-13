@@ -14,9 +14,8 @@ replica (S3, a local directory, etc.), and can **restore** a database from those
 > **compaction/retention**, **distributed leasing**, and **continuous follow-restore** are all
 > implemented and tested (**117 core + 18 S3** tests; typecheck + ESLint clean; CI on Node 24/26 +
 > a Go-interop golden job). The publish pipeline is repo-ready (build → `dist` + `.d.ts`,
-> tag-triggered `npm publish --provenance`). Remaining items are deliberately deferred
-> (see `PLAN.md` §9): a CLI + YAML config, VFS real-time mirroring, an IPC control server, and
-> metrics/telemetry.
+> tag-triggered `npm publish --provenance`). A small set of items is deliberately deferred — see
+> [Deferred features](#deferred-features) below.
 
 ---
 
@@ -294,8 +293,8 @@ replication. Instead it:
 4. **Restores** by compacting a snapshot with the stream of level-0 files and writing a valid
    SQLite file.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, and
-[`PLAN.md`](PLAN.md) for the milestone plan and format details.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and
+[`docs/LTX_FORMAT.md`](docs/LTX_FORMAT.md) for the on-disk format.
 
 ### Concurrency & snapshot consistency
 
@@ -453,12 +452,26 @@ single-writer, single-file database. If host A has `row id=1 → "X"` and host B
 
 ---
 
+## Deferred features
+
+Not implemented — listed here so the roadmap is clear. None of these are required for the library
+core to replicate, snapshot, compact, lease, and restore a SQLite database.
+
+- **CLI + YAML config** — this is a *library*. The `litestream replicate/restore/ltx/reset/snapshots`
+  CLI and a `litestream.yml`-style config are out of scope for now.
+- **Metrics/telemetry** — no Prometheus/OpenTelemetry instrumentation yet.
+- **Point-in-time restore edge cases** — `txID`/timestamp restore is supported, but litestream's
+  full edge-case matrix is not exhaustively covered.
+- **VFS real-time mirroring** — hooking into SQLite's VFS to mirror writes live is not implemented.
+- **IPC control server** — litestream's Unix-socket IPC server is not implemented.
+
+---
+
 ## Documentation
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system design (DB, Replica, ReplicaClient,
   LTX, WAL, backends).
 - [`docs/LTX_FORMAT.md`](docs/LTX_FORMAT.md) — the LTX binary format.
-- [`PLAN.md`](PLAN.md) — the porting plan, format tables, milestone status, and known risks.
 - [`test/`](test) — TDD test suite (`npm test`).
 
 ---
