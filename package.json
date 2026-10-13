@@ -45,7 +45,7 @@
     "typecheck": "tsc -p . --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "build": "tsc -p tsconfig.build.json && node scripts/rewrite-dts.mjs dist",
+    "build": "tsc -p tsconfig.build.json",
     "prepack": "pnpm build",
     "golden:go": "cd tools/golden && go run .",
     "pretest:all": "pnpm build",
