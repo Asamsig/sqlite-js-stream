@@ -1,6 +1,6 @@
 {
   "name": "@platformatic/sqlite-js-stream",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Node.js port of Litestream: SQLite streaming replication & disaster recovery via LTX files",
   "type": "module",
   "packageManager": "pnpm@12.4.2",
