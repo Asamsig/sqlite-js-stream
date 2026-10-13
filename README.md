@@ -1,34 +1,23 @@
 # sqlite-js-stream
 
 A **Node.js port of [Litestream](https://github.com/benbjohnson/litestream)** — SQLite streaming
-replication and disaster recovery — written in **TypeScript** using Node's native type stripping
-(no build step) and the built-in `node:sqlite`.
+replication and disaster recovery — written in **TypeScript** and built on the built-in `node:sqlite`.
 
 SQLite is the most widely deployed database on the planet but it only lives on a single machine.
 If that machine dies, your database is gone. This library replicates a SQLite database's **WAL
 (Write-Ahead Log)** file into immutable, chronological **LTX (Log Transaction)** files on a remote
 replica (S3, a local directory, etc.), and can **restore** a database from those files.
 
-> **Status:** the in-scope library is complete. LTX format, WAL reader, file + S3 backends,
-> end-to-end DB+Replica sync/restore, incremental sync + level-9 snapshots, multi-level
-> **compaction/retention**, **distributed leasing**, and **continuous follow-restore** are all
-> implemented and tested (**117 core + 18 S3** tests; typecheck + ESLint clean; CI on Node 24/26 +
-> a Go-interop golden job). The publish pipeline is repo-ready (build → `dist` + `.d.ts`,
-> tag-triggered `npm publish --provenance`). A small set of items is deliberately deferred — see
-> [Deferred features](#deferred-features) below.
-
 ---
 
 ## Requirements
 
-- **Node.js `>= 24`** — required for native `.ts` type stripping (dev/test) and the built-in `node:sqlite`.
+- **Node.js `>= 24`** — required for the built-in `node:sqlite`.
 - Runtime dependency: `lz4js` (pure-JS LZ4 **block** decoder), matching the LTX format.
   Compression is a byte-identical TypeScript port of Go's `pierrec/lz4/v4` Fast block compressor.
 
-During development we run the `.ts` source directly under Node's type stripping
-(no dev build). The **published** package ships transpiled `.js` plus `.d.ts`
-declarations — Node will not type-strip `.ts` files inside `node_modules`, so the
-tarball is built at publish time via `pnpm build` (see below).
+The **published** package ships compiled JavaScript plus TypeScript declarations
+(`dist/*.js` + `dist/*.d.ts`), built at publish time via `pnpm build`.
 
 ---
 
