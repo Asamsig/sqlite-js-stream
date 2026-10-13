@@ -130,28 +130,34 @@ describe('Replica.run() with a leaser (primary/follower)', () => {
     // A starts first → becomes primary.
     const acA = new AbortController();
     const runA = replicaA.run({ intervalMs: 20, signal: acA.signal });
-    await waitFor(() => replicaA.isPrimary());
-    assert.ok(replicaA.isPrimary());
-
-    // B starts while A holds the lease → follower.
     const acB = new AbortController();
-    const runB = replicaB.run({ intervalMs: 20, signal: acB.signal });
-    await waitFor(() => !replicaB.isPrimary(), 2000);
-    assert.ok(!replicaB.isPrimary());
+    let runB: Promise<void> = Promise.resolve();
+    try {
+      await waitFor(() => replicaA.isPrimary());
+      assert.ok(replicaA.isPrimary());
 
-    // A follower must not be able to write directly.
-    await assert.rejects(replicaB.sync(), ErrLeaseNotHeld);
+      // B starts while A holds the lease → follower.
+      runB = replicaB.run({ intervalMs: 20, signal: acB.signal });
+      await waitFor(() => !replicaB.isPrimary(), 2000);
+      assert.ok(!replicaB.isPrimary());
 
-    // Stop the primary → it releases the lease → B becomes primary.
-    acA.abort();
-    await runA;
-    await waitFor(() => replicaB.isPrimary(), 3000);
-    assert.ok(replicaB.isPrimary());
+      // A follower must not be able to write directly.
+      await assert.rejects(replicaB.sync(), ErrLeaseNotHeld);
 
-    acB.abort();
-    await runB;
-    db.close();
-    await rm(dir, { recursive: true, force: true });
+      // Stop the primary → it releases the lease → B becomes primary.
+      acA.abort();
+      await runA;
+      await waitFor(() => replicaB.isPrimary(), 3000);
+      assert.ok(replicaB.isPrimary());
+    } finally {
+      // Always stop both loops (and their lease timers), or a failed assertion
+      // leaves them running and the test process never exits.
+      acA.abort();
+      acB.abort();
+      await Promise.allSettled([runA, runB]);
+      db.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test('dedicated renewal timer keeps the lease alive with a large loop interval', async () => {
@@ -168,21 +174,23 @@ describe('Replica.run() with a leaser (primary/follower)', () => {
 
     const ac = new AbortController();
     const runPromise = replica.run({ intervalMs: 5000, signal: ac.signal });
-    await waitFor(() => replica.isPrimary());
+    try {
+      await waitFor(() => replica.isPrimary());
 
-    // Wait well past the 300ms TTL. If renewal were tied to the loop (5s), the
-    // lock would have expired. With the timer it stays current.
-    await new Promise((r) => setTimeout(r, 700));
-    const lock = JSON.parse(
-      await (await import('node:fs/promises')).readFile(nodePath.join(dir, 'lock.json'), 'utf8'),
-    ) as { expires_at: string };
-    assert.ok(Date.parse(lock.expires_at) > Date.now(), 'lease should have been renewed');
-    assert.ok(replica.isPrimary());
-
-    ac.abort();
-    await runPromise;
-    db.close();
-    await rm(dir, { recursive: true, force: true });
+      // Wait well past the 300ms TTL. If renewal were tied to the loop (5s), the
+      // lock would have expired. With the timer it stays current.
+      await new Promise((r) => setTimeout(r, 700));
+      const lock = JSON.parse(
+        await (await import('node:fs/promises')).readFile(nodePath.join(dir, 'lock.json'), 'utf8'),
+      ) as { expires_at: string };
+      assert.ok(Date.parse(lock.expires_at) > Date.now(), 'lease should have been renewed');
+      assert.ok(replica.isPrimary());
+    } finally {
+      ac.abort();
+      await runPromise;
+      db.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

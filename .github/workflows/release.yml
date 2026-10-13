@@ -1,8 +1,9 @@
 name: Publish release
 
-# Manually triggered release. Bumps every workspace package to the same
-# version, pushes the bump commit, publishes to npm via OIDC trusted
-# publishing (no NPM_TOKEN) and creates the GitHub release.
+# Manually triggered release. Tests are not run here: they run in CI on every
+# push to main. Bumps every workspace package to the same version, pushes the
+# bump commit, publishes to npm via OIDC trusted publishing (no NPM_TOKEN) and
+# creates the GitHub release.
 #
 # Publishing is only possible from the `main` environment, which is
 # restricted to the `main` branch; the npm trusted publisher configuration
@@ -24,6 +25,7 @@ jobs:
   release-npm:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: main
     permissions:
       id-token: write
@@ -50,9 +52,6 @@ jobs:
 
       - name: Lint (ESLint + neostandard, type-stripping guard)
         run: pnpm lint
-
-      - name: Test
-        run: pnpm test:all
 
       - name: Bump version
         id: bump

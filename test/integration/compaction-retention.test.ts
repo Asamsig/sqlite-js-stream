@@ -147,14 +147,14 @@ test('run() schedules compaction and retention while replicating', async () => {
   const ac = new AbortController();
   const outPath = join(makeTempDir('restore-'), 'w.db');
 
+  const runPromise = replica.run({
+    intervalMs: 10,
+    compactionIntervalMs: 40,
+    retentionIntervalMs: 80,
+    retention: { snapshotRetain: 1, l0RetentionMs: 0 },
+    signal: ac.signal,
+  });
   try {
-    const runPromise = replica.run({
-      intervalMs: 10,
-      compactionIntervalMs: 40,
-      retentionIntervalMs: 80,
-      retention: { snapshotRetain: 1, l0RetentionMs: 0 },
-      signal: ac.signal,
-    });
 
     // New writes land as additional L0 files over the next several ticks.
     for (let i = 0; i < 5; i++) {
@@ -191,6 +191,10 @@ test('run() schedules compaction and retention while replicating', async () => {
       'the live-head level-0 file is retained',
     );
   } finally {
+    // Always stop the run loop, or a failed assertion leaves it (and the test
+    // process) running forever.
+    ac.abort();
+    await runPromise;
     replica.close();
     t.close();
   }
@@ -204,17 +208,24 @@ async function waitForRestoredRows(
   timeoutMs: number,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let last = 'no restore attempted';
   for (;;) {
-    await replica.restore({ outputPath: outPath });
-    const d = new DatabaseSync(outPath);
-    const n = (d.prepare('SELECT count(*) AS n FROM t').get() as { n: number }).n;
-    const ic = (d.prepare('PRAGMA integrity_check').get() as { integrity_check: string })
-      .integrity_check;
-    d.close();
-    if (n === expected && ic === 'ok') return;
-    if (Date.now() > deadline) {
-      throw new Error(`timed out waiting for ${expected} rows (got ${n})`);
+    // The run loop is live: before the first sync lands the replica is empty
+    // (NoMatchingBackupError), and compaction/retention may change the file set
+    // mid-restore. Treat any failure as "not there yet" and retry.
+    try {
+      await replica.restore({ outputPath: outPath });
+      const d = new DatabaseSync(outPath);
+      const n = (d.prepare('SELECT count(*) AS n FROM t').get() as { n: number }).n;
+      const ic = (d.prepare('PRAGMA integrity_check').get() as { integrity_check: string })
+        .integrity_check;
+      d.close();
+      if (n === expected && ic === 'ok') return;
+      last = `got ${n} rows, integrity_check=${ic}`;
+    } catch (err) {
+      last = `restore failed: ${(err as Error).message}`;
     }
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${expected} rows (${last})`);
     await sleep(150);
   }
 }

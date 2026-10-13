@@ -146,8 +146,8 @@ test('run() compacts per level using time-bucketed scheduling', async () => {
     { level: 3, intervalMs: 120 },
   ]);
 
+  const runPromise = replica.run({ intervalMs: 10, compactionLevels: levels, signal: ac.signal });
   try {
-    const runPromise = replica.run({ intervalMs: 10, compactionLevels: levels, signal: ac.signal });
 
     for (let i = 0; i < 5; i++) {
       t.db.exec("INSERT INTO t (name) VALUES ('x')");
@@ -174,6 +174,10 @@ test('run() compacts per level using time-bucketed scheduling', async () => {
     for (let level = 1; level <= 3; level++) compacted += (await countLevel(client, level)).length;
     assert.ok(compacted >= 1, 'per-level scheduling produced a higher-level file');
   } finally {
+    // Always stop the run loop, or a failed assertion leaves it (and the test
+    // process) running forever.
+    ac.abort();
+    await runPromise;
     replica.close();
     t.close();
   }
@@ -186,15 +190,24 @@ async function waitForRestoredRows(
   timeoutMs: number,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let last = 'no restore attempted';
   for (;;) {
-    await replica.restore({ outputPath: outPath });
-    const d = new DatabaseSync(outPath);
-    const n = (d.prepare('SELECT count(*) AS n FROM t').get() as { n: number }).n;
-    const ic = (d.prepare('PRAGMA integrity_check').get() as { integrity_check: string })
-      .integrity_check;
-    d.close();
-    if (n === expected && ic === 'ok') return;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${expected} rows (got ${n})`);
+    // The run loop is live: before the first sync lands the replica is empty
+    // (NoMatchingBackupError), and compaction/retention may change the file set
+    // mid-restore. Treat any failure as "not there yet" and retry.
+    try {
+      await replica.restore({ outputPath: outPath });
+      const d = new DatabaseSync(outPath);
+      const n = (d.prepare('SELECT count(*) AS n FROM t').get() as { n: number }).n;
+      const ic = (d.prepare('PRAGMA integrity_check').get() as { integrity_check: string })
+        .integrity_check;
+      d.close();
+      if (n === expected && ic === 'ok') return;
+      last = `got ${n} rows, integrity_check=${ic}`;
+    } catch (err) {
+      last = `restore failed: ${(err as Error).message}`;
+    }
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${expected} rows (${last})`);
     await sleep(100);
   }
 }
