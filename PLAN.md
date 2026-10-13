@@ -47,7 +47,7 @@ Verified on Node `v24.21.0`.
 > (L0→…→L9 with litestream-style time-bucketed scheduling), a **pnpm monorepo** with an **S3 addon**
 > (`packages/backend-s3`), distributed **leasing** (`lock.json` conditional writes), and continuous
 > **follow-restore** (`Replica.follow()`), and a typed-error convention (`SqliteJsStreamError` + `.code`).
-> Test suite: **132 tests (114 core + 18 S3)**, green on Node 24 & 26.
+> Test suite: **135 tests (117 core + 18 S3)**, green on Node 24 & 26.
 
 > **Publishing + linting completed:** packages are scoped to `@platformatic/*` and published from a
 > **type-stripping build pipeline** — `tsc` transpiles `src/*.ts` → `dist/*.js` (types erased) plus
@@ -65,6 +65,13 @@ Verified on Node `v24.21.0`.
 > re-encoded byte-for-byte in `test/ltx/go-interop.test.ts`, so any drift in our encoder, decoder, or
 > the Go format is caught by the `interop-go` CI job. `lz4js` is retained only for LZ4 block
 > **decompression** (which need not be byte-identical).
+
+> **Remaining / next steps.** The in-scope library is functionally complete. The last *operational*
+> step is the actual **npm release**: create a `v0.1.0` tag to trigger `release.yml` and configure the
+> `NPM_TOKEN` repository secret (the tag can be created by an agent; the secret and the publish itself
+> are operator-owned). Deferred/optional features remain documented in §9 below — a CLI + YAML config,
+> metrics/telemetry, point-in-time restore edge cases, VFS real-time mirroring, and an IPC control
+> server.
 
 ---
 
@@ -208,7 +215,7 @@ persists by reading the highest local L0 LTX file (its header carries `WALOffset
 | Concern | Choice | Why |
 |---------|--------|-----|
 | SQLite | **`node:sqlite`** (`DatabaseSync`) | Built-in (Node 24), no native compile. Confirm WAL/PRAGMA/read-txn/checkpoint behavior in tests. |
-| LZ4 codec | **`lz4js` (pure JS)**, LTX **block** format only | LTX uses block format. `lz4js` **decompression** is Go-interoperable, but our compressed bytes are valid-yet-not-byte-identical to Go's `pierrec/lz4/v4`, so file checksums differ. |
+| LZ4 codec | **`lz4js` for decode + a TS port of Go's `pierrec/lz4/v4` for encode**, LTX **block** format only | LTX uses block format. Our `compressBlock` is a **byte-identical** TS port of Go's Fast block compressor, so file bytes/checksums match Go exactly; `lz4js` handles **decompression** (which need not be byte-identical). |
 | CRC-64 ISO | **Implement in TS** (`src/ltx/crc64.ts`) | No good npm pkg; table-based, test against Go vectors (`"123456789"` ⇒ `b90956c775a41001`). |
 | Binary buffer accumulation | `@platformatic/dynamic-buffer` *(optional)* | Nice for streaming WAL/page/index; not required for MVP (plain `Buffer` is fine). |
 | Test runner | **`node:test`** + `node:assert/strict` in `.test.ts` | Built-in, runs `.ts` directly via type stripping. |
@@ -571,12 +578,13 @@ backups.
    `superfly/ltx` (v0.5.3) LTX fixtures into `testdata/go/`, and `test/ltx/go-interop.test.ts` decodes
    them with our TS decoder (header, pages, page index, trailer, LZ4 block decompression, CRC-64 ISO
    file + post-apply checksums). The `interop-go` CI job regenerates the fixtures and fails if they
-   drift (`git diff --exit-code -- testdata/go`). Because `lz4js` emits valid-but-not-byte-identical LZ4
-   blocks, this verifies the **decode** direction plus the checksum algorithms, not byte-identical encode.
-3. **LZ4 block format.** ✅ **resolved** — we use pure-JS `lz4js` (block format). `lz4js`
-   **decodes** Go-produced bytes correctly, so decompression interop is guaranteed; only
-   byte-identical *encoding* would require a liblz4-compatible codec (`lz4-napi`/WASM), which is an
-   optional future upgrade.
+   drift (`git diff --exit-code -- testdata/go`). `test/ltx/go-interop.test.ts` also **re-encodes** the
+   same logical content and asserts **byte-identical** output, so drift in the format, the decoder, or
+   the encoder is caught in both directions.
+3. **LZ4 block format.** ✅ **resolved** — `compressBlock` is a **byte-identical** TypeScript port of
+   Go's `pierrec/lz4/v4` Fast block compressor (validated against Go's own `CompressBlock` vectors in
+   `test/ltx/lz4.test.ts`), so the files we write match Go exactly. `lz4js` is retained only for LZ4
+   block **decompression**.
 4. **CRC-64 ISO vs ECMA.** ✅ **resolved** – **ISO is used** (mismatch = broken interop). Provide a direct vector
    test to lock this in.
 5. **TXID/position persistence.** ✅ **resolved** – position is derived from local L0 LTX headers (no separate pos
@@ -630,7 +638,7 @@ backups.
 
 ## 11. Definition of done for MVP (Milestones 0–4)
 
-- [x] `npm test` green (132 tests: 114 core + 18 S3); `tsc --noEmit` clean; `eslint .` clean.
+- [x] `npm test` green (135 tests: 117 core + 18 S3); `tsc --noEmit` clean; `eslint .` clean.
 - [x] LTX encoder/decoder pass round-trip + golden + checksum-verification tests.
 - [x] WAL reader parses real `node:sqlite` WAL files, `pageMap` correct.
 - [x] `FileReplicaClient` writes/reads/deletes in the correct directory layout.

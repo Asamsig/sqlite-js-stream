@@ -9,10 +9,14 @@ If that machine dies, your database is gone. This library replicates a SQLite da
 (Write-Ahead Log)** file into immutable, chronological **LTX (Log Transaction)** files on a remote
 replica (S3, a local directory, etc.), and can **restore** a database from those files.
 
-> **Status:** work in progress. Milestones 0–5 are complete (LTX format, WAL reader, file backend,
-> end-to-end DB+Replica sync/restore, incremental sync + level-9 snapshots + compactor + store).
-> Cloud backends, multi-level compaction/retention, distributed leasing, VFS mirroring, and the
-> IPC server are not yet implemented.
+> **Status:** the in-scope library is complete. LTX format, WAL reader, file + S3 backends,
+> end-to-end DB+Replica sync/restore, incremental sync + level-9 snapshots, multi-level
+> **compaction/retention**, **distributed leasing**, and **continuous follow-restore** are all
+> implemented and tested (**117 core + 18 S3** tests; typecheck + ESLint clean; CI on Node 24/26 +
+> a Go-interop golden job). The publish pipeline is repo-ready (build → `dist` + `.d.ts`,
+> tag-triggered `npm publish --provenance`). Remaining items are deliberately deferred
+> (see `PLAN.md` §9): a CLI + YAML config, VFS real-time mirroring, an IPC control server, and
+> metrics/telemetry.
 
 ---
 
