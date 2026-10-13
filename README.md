@@ -88,11 +88,17 @@ level-0 files:
 await replica.restore({ outputPath: '/data/restored.db' });
 ```
 
-Restore to a specific transaction ID:
+Restore to a specific transaction ID, or to a point-in-time (the latest backup created at/before
+the given time). Pass exactly one of `txID` or `timestamp`:
 
 ```ts
 await replica.restore({ outputPath: '/data/app-at-txid.db', txID: 42n });
+await replica.restore({ outputPath: '/data/app-at-time.db', timestamp: new Date('2025-06-01T12:00:00Z') });
 ```
+
+Restoring to `txID`/`timestamp` is at **backup boundaries** (the end of an LTX file), and a target
+with no matching backup throws `NoMatchingBackupError`. A "latest" restore over a non-contiguous
+file set throws `RestoreGapError` rather than silently returning a partial database.
 
 ### Continuously restore (follow)
 
@@ -449,8 +455,6 @@ core to replicate, snapshot, compact, lease, and restore a SQLite database.
 - **CLI + YAML config** — this is a *library*. The `litestream replicate/restore/ltx/reset/snapshots`
   CLI and a `litestream.yml`-style config are out of scope for now.
 - **Metrics/telemetry** — no Prometheus/OpenTelemetry instrumentation yet.
-- **Point-in-time restore edge cases** — `txID`/timestamp restore is supported, but litestream's
-  full edge-case matrix is not exhaustively covered.
 - **VFS real-time mirroring** — hooking into SQLite's VFS to mirror writes live is not implemented.
 - **IPC control server** — litestream's Unix-socket IPC server is not implemented.
 

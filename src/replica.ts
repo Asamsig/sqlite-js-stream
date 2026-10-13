@@ -202,6 +202,28 @@ export class NoMatchingBackupError extends SqliteJsStreamError {
   }
 }
 
+/** Base class for errors thrown by {@link Replica.restore}. Carries a stable code. */
+export class RestoreError extends SqliteJsStreamError {
+  constructor(code: string, message: string) {
+    super(code, message);
+    this.name = 'RestoreError';
+  }
+}
+
+/**
+ * The replica's LTX files are not contiguous for a restore target, so restoring
+ * would silently drop a range of transactions (data-loss signal). Raised for a
+ * "latest" restore (`txID = 0`, no timestamp) when the available files have a
+ * gap. Preferring a per-target restore (`txID`/`timestamp`) lets you pick a
+ * contiguous range instead.
+ */
+export class RestoreGapError extends RestoreError {
+  constructor(message: string) {
+    super('ERR_RESTORE_GAP', message);
+    this.name = 'RestoreGapError';
+  }
+}
+
 
 
 export interface ReplicaRunOptions {
@@ -668,11 +690,27 @@ export class Replica {
     await this.restore({ outputPath: this.path });
   }
 
-  /** Restore reconstructs a SQLite database at `outputPath` from LTX files. */
+  /**
+   * Restore reconstructs a SQLite database at `outputPath` from LTX files.
+   *
+   * By default it restores the **latest** backup. You can restore to a specific
+   * point-in-time by passing exactly one of `txID` (a transaction boundary) or
+   * `timestamp` (the latest backup created at/before the given time), not both.
+   */
   async restore(opt: RestoreOptions): Promise<void> {
     if (!opt.outputPath) throw new InvalidArgumentError('output path required');
 
-    const plan = await calcRestorePlan(this.client, opt.txID ?? 0n);
+    const txID = opt.txID ?? 0n;
+    if (txID < 0n) throw new InvalidArgumentError('txID must be >= 0');
+    const timestampMs = opt.timestamp?.getTime();
+    if (timestampMs !== undefined && Number.isNaN(timestampMs)) {
+      throw new InvalidArgumentError('invalid timestamp');
+    }
+    if (txID !== 0n && timestampMs !== undefined) {
+      throw new InvalidArgumentError('cannot restore by both txID and timestamp');
+    }
+
+    const plan = await calcRestorePlan(this.client, txID, timestampMs);
     if (plan.length === 0) throw new NoMatchingBackupError();
 
     await mkdir(nodePath.dirname(opt.outputPath), { recursive: true });
@@ -1291,22 +1329,53 @@ export class Replica {
 
 /**
  * CalcRestorePlan returns LTX files to apply, in order, to reconstruct a
- * database up to `txID` (0 = latest). It prefers the latest level-9 snapshot
- * before the target as the base, then appends contiguous files across all
+ * database up to a point-in-time target. It prefers the latest level-9 snapshot
+ * at or before the target as the base, then appends contiguous files across all
  * compaction levels (0..maxLevel) that extend the range.
+ *
+ * Exactly one of `txID` (0 = latest) or `timestampMs` (ms since epoch) targets
+ * the restore point; passing both is an error. When `timestampMs` is set, only
+ * files created **before** it are eligible and clients are queried with
+ * `useMetadata: true` so `createdAt` is accurate.
+ *
+ * For the "latest" restore (`txID = 0`, no timestamp) a non-contiguous file set
+ * is a data-loss signal and raises {@link RestoreGapError} rather than
+ * silently restoring a partial database.
  */
 export async function calcRestorePlan(
   client: ReplicaClient,
   txID: bigint,
+  timestampMs?: number,
 ): Promise<FileInfo[]> {
+  if (txID < 0n) throw new InvalidArgumentError('txID must be >= 0');
+  if (txID !== 0n && timestampMs !== undefined) {
+    throw new InvalidArgumentError('cannot restore by both txID and timestamp');
+  }
+  if (timestampMs !== undefined && Number.isNaN(timestampMs)) {
+    throw new InvalidArgumentError('invalid timestamp');
+  }
+
+  // For timestamp-based restore we query with useMetadata so `createdAt` is the
+  // accurate object creation time (S3 metadata), not just the listing time.
+  const useMetadata = timestampMs !== undefined;
+
+  /** True if `info` is at/before the requested restore point. */
+  const beforeTarget = (info: FileInfo): boolean => {
+    if (txID !== 0n && info.maxTXID > txID) return false;
+    if (timestampMs !== undefined && info.createdAt >= timestampMs) return false;
+    return true;
+  };
+
   const plan: FileInfo[] = [];
   let currentMax = 0n;
 
   // Pick the latest level-9 snapshot at or before the target as the base.
   let base: FileInfo | null = null;
-  for await (const info of client.ltxFiles({ level: SnapshotLevel, seek: 0n, useMetadata: false })) {
-    if (txID !== 0n && info.maxTXID > txID) continue;
-    if (!base || info.maxTXID > base.maxTXID) base = info;
+  for await (const info of client.ltxFiles({ level: SnapshotLevel, seek: 0n, useMetadata })) {
+    if (!beforeTarget(info)) continue;
+    if (!base || info.maxTXID > base.maxTXID || (info.maxTXID === base.maxTXID && info.createdAt > base.createdAt)) {
+      base = info;
+    }
   }
   if (base) {
     plan.push(base);
@@ -1318,8 +1387,8 @@ export async function calcRestorePlan(
   // by a file at any level; gather them all and prefer the highest level first.
   const candidates: FileInfo[] = [];
   for (let level = 0; level < SnapshotLevel; level++) {
-    for await (const info of client.ltxFiles({ level, seek: 0n, useMetadata: false })) {
-      if (txID !== 0n && info.maxTXID > txID) continue;
+    for await (const info of client.ltxFiles({ level, seek: 0n, useMetadata })) {
+      if (!beforeTarget(info)) continue;
       candidates.push(info);
     }
   }
@@ -1331,9 +1400,14 @@ export async function calcRestorePlan(
   });
 
   const seenRanges: Array<[bigint, bigint]> = [];
+  let gap = false;
   for (const info of candidates) {
     if (info.maxTXID <= currentMax) continue; // covered by the base or earlier
-    if (info.minTXID > currentMax + 1n) break; // non-contiguous gap
+    if (info.minTXID > currentMax + 1n) {
+      // Non-contiguous: no file continues from currentMax + 1.
+      gap = true;
+      break;
+    }
     // Skip a candidate entirely covered by a higher-level file already in the plan.
     if (seenRanges.some(([lo, hi]) => lo <= info.minTXID && info.maxTXID <= hi)) continue;
     plan.push(info);
@@ -1346,6 +1420,12 @@ export async function calcRestorePlan(
   }
   if (txID !== 0n && currentMax < txID) {
     throw new NoMatchingBackupError();
+  }
+  // A latest restore must be fully contiguous; a gap means the replica lost data.
+  if (txID === 0n && timestampMs === undefined && gap) {
+    throw new RestoreGapError(
+      `non-contiguous ltx files: contiguous range ends at txID ${currentMax} but the next file starts later`,
+    );
   }
   return plan;
 }
