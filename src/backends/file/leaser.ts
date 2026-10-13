@@ -8,7 +8,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { link, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import nodePath from 'node:path';
 
 import {
@@ -20,6 +20,9 @@ import {
   type Leaser,
 } from '../../leaser.ts';
 import { FileReplicaError } from '../../errors.ts';
+
+// Disambiguates temp files written in the same millisecond by this process.
+let tmpSeq = 0;
 
 function sha256(data: Uint8Array): string {
   return createHash('sha256').update(data).digest('hex');
@@ -82,10 +85,13 @@ export class FileLeaser implements Leaser {
     const bytes = encodeLease(lease);
 
     if (existing === null) {
-      // Exclusive create so we do not clobber a concurrent acquirer.
-      let fh;
+      // Exclusive create so we do not clobber a concurrent acquirer. Write a
+      // temp file and hard-link it into place so the lock appears atomically
+      // with its full contents; a racing reader never sees an empty file.
+      const tmp = `${this.lockPath}.tmp-${process.pid}-${Date.now()}-${tmpSeq++}`;
+      await writeFile(tmp, bytes);
       try {
-        fh = await open(this.lockPath, 'wx');
+        await link(tmp, this.lockPath);
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === 'EEXIST') {
@@ -97,12 +103,12 @@ export class FileLeaser implements Leaser {
           return this.acquireLease();
         }
         throw err;
+      } finally {
+        await rm(tmp, { force: true });
       }
-      await fh.write(bytes);
-      await fh.close();
     } else {
       // Existing lease expired: atomically replace it.
-      const tmp = `${this.lockPath}.tmp-${process.pid}-${Date.now()}`;
+      const tmp = `${this.lockPath}.tmp-${process.pid}-${Date.now()}-${tmpSeq++}`;
       await writeFile(tmp, bytes);
       await rename(tmp, this.lockPath);
     }
@@ -118,7 +124,7 @@ export class FileLeaser implements Leaser {
 
     const renewed = new Lease(lease.generation, Date.now() + this.ttlMs, lease.owner);
     const bytes = encodeLease(renewed);
-    const tmp = `${this.lockPath}.tmp-${process.pid}-${Date.now()}`;
+    const tmp = `${this.lockPath}.tmp-${process.pid}-${Date.now()}-${tmpSeq++}`;
     await writeFile(tmp, bytes);
     await rename(tmp, this.lockPath);
 

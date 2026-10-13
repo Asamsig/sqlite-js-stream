@@ -83,6 +83,30 @@ describe('FileLeaser', () => {
     void expired;
     await rm(dir, { recursive: true, force: true });
   });
+
+  test('concurrent acquires: exactly one wins, the rest see LeaseExistsError', async () => {
+    for (let i = 0; i < 50; i++) {
+      const dir = makeTempDir('lease-race-');
+      const results = await Promise.allSettled(
+        Array.from({ length: 4 }, () => new FileLeaser(dir).acquireLease()),
+      );
+      const won = results.filter((r) => r.status === 'fulfilled');
+      assert.equal(won.length, 1);
+      for (const r of results) {
+        if (r.status === 'rejected') assert.ok(r.reason instanceof LeaseExistsError, String(r.reason));
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('setting a leaser makes the replica a follower until it acquires', () => {
+  const replica = new Replica('/nonexistent.db', new FileReplicaClient(makeTempDir('lease-set-')));
+  assert.ok(replica.isPrimary());
+  replica.leaser = new FileLeaser(makeTempDir('lease-set-'));
+  assert.ok(!replica.isPrimary());
+  replica.leaser = null;
+  assert.ok(replica.isPrimary());
 });
 
 describe('Replica.run() with a leaser (primary/follower)', () => {

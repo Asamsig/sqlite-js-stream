@@ -306,6 +306,9 @@ export class Replica {
 
   set leaser(leaser: Leaser | null) {
     this.leaserValue = leaser;
+    // Mirror the constructor: a newly set leaser is not held until acquired.
+    // While running, {@link run} owns the primary state.
+    if (!this.runActive) this.leasePrimary = leaser === null;
   }
 
   /**
