@@ -75,6 +75,13 @@ for (const file of await getPackageFiles()) {
   await writeFile(file, JSON.stringify(pkg, null, 2) + '\n')
 }
 
+// Re-running a release whose bump already landed (e.g. a failed publish) leaves
+// nothing to commit; publish then only pushes versions missing from npm.
+if (execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trim() === '') {
+  console.log(`version is already ${version}; nothing to commit`)
+  process.exit(0)
+}
+
 if (process.env.GITHUB_ACTIONS === 'true') {
   execFileSync('git', ['config', '--global', 'user.name', userInfo[0]])
   execFileSync('git', ['config', '--global', 'user.email', userInfo[1]])

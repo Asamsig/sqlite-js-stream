@@ -7,6 +7,16 @@
     "node": ">=24"
   },
   "license": "Apache-2.0",
+  "author": "Matteo Collina",
+  "homepage": "https://github.com/platformatic/sqlite-js-stream/tree/main/packages/backend-s3",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/platformatic/sqlite-js-stream.git",
+    "directory": "packages/backend-s3"
+  },
+  "bugs": {
+    "url": "https://github.com/platformatic/sqlite-js-stream/issues"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
