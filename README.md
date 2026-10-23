@@ -149,6 +149,23 @@ const replica = new Replica('/data/app.db', client);
 The `file` scheme is built into the core. Additional schemes (S3, etc.) are
 registered by importing the matching addon (see below).
 
+### Custom read connection
+
+During sync and snapshot, a replica pins the WAL with a short read-only
+`node:sqlite` transaction. To use another driver for that connection, e.g. for
+libsql-encrypted databases that `node:sqlite` cannot open, pass `openReader`:
+
+```js
+import Database from 'libsql';
+
+const replica = new Replica('/data/app.db', client, undefined, {
+  openReader: (path) => new Database(path, { readonly: true, encryptionKey: process.env.DB_KEY }),
+});
+```
+
+Pages are copied as-is, so the replica stays encrypted and a restored database
+opens with the same key.
+
 ### S3 upload strategy
 
 The `@platformatic/sqlite-js-stream-s3` addon provides an S3 replica client. Import it

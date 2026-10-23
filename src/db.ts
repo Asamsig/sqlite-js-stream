@@ -37,6 +37,28 @@ import { SnapshotLevel } from './replica-client.ts';
 import { mkdirAll } from './util/fs.ts';
 import { DatabaseError } from './errors.ts';
 
+/**
+ * ReaderConnection is the minimal SQLite connection used to pin a WAL read
+ * snapshot during sync/snapshot. `node:sqlite`'s `DatabaseSync` satisfies it;
+ * other drivers (e.g. libsql with an encryption key) can be plugged in via
+ * {@link OpenReader}.
+ */
+export interface ReaderConnection {
+  exec(sql: string): void;
+  prepare(sql: string): { get(): unknown };
+  close(): void;
+}
+
+/**
+ * OpenReader opens a read-only {@link ReaderConnection} for a database path.
+ * Defaults to a read-only `node:sqlite` connection.
+ */
+export type OpenReader = (path: string) => ReaderConnection;
+
+function defaultOpenReader(path: string): ReaderConnection {
+  return new DatabaseSync(path, { readOnly: true });
+}
+
 /** Reads the page size from the SQLite database header (bytes 16-17). */
 function headerPageSize(buf: Uint8Array): number {
   const raw = buf.length >= 18 ? (buf[16] << 8) | buf[17] : 0;
@@ -52,20 +74,23 @@ export class LocalDatabase {
   readonly path: string;
   readonly metaPath: string;
   readonly pageSize: number;
-  private conn: DatabaseSync | null = null;
+  private conn: ReaderConnection | null = null;
+  private openReader: OpenReader;
 
-  private constructor(path: string, metaPath: string, pageSize: number) {
+  private constructor(path: string, metaPath: string, pageSize: number, openReader: OpenReader) {
     this.path = path;
     this.metaPath = metaPath;
     this.pageSize = pageSize;
+    this.openReader = openReader;
   }
 
   /**
    * Open opens a local database reader for `path`. It does not create the
    * database — the application owns it. `pageSize` is read from the database
-   * header; a missing file falls back to the default page size.
+   * header; a missing file falls back to the default page size. `openReader`
+   * overrides the connection used to pin read snapshots.
    */
-  static async open(path: string): Promise<LocalDatabase> {
+  static async open(path: string, openReader: OpenReader = defaultOpenReader): Promise<LocalDatabase> {
     const metaPath = `${path}-litestream`;
     await mkdirAll(nodePath.join(metaPath, 'ltx', '0'));
 
@@ -80,7 +105,7 @@ export class LocalDatabase {
       /* database not present yet; use default page size */
     }
 
-    return new LocalDatabase(path, metaPath, pageSize);
+    return new LocalDatabase(path, metaPath, pageSize, openReader);
   }
 
   /** WalPath returns the path to the database's WAL file. */
@@ -156,9 +181,9 @@ export class LocalDatabase {
    * Opens (and caches) a read-only connection used to hold a snapshot during
    * sync/snapshot. Not part of the public API; the DB file must exist.
    */
-  private ensureConn(): DatabaseSync {
+  private ensureConn(): ReaderConnection {
     if (this.conn === null) {
-      this.conn = new DatabaseSync(this.path, { readOnly: true });
+      this.conn = this.openReader(this.path);
       this.conn.exec('PRAGMA busy_timeout=5000');
     }
     return this.conn;

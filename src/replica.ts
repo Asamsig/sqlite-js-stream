@@ -33,7 +33,7 @@ import {
   type FileInfo,
   type CompactionLevel,
 } from './ltx/index.ts';
-import { LocalDatabase } from './db.ts';
+import { LocalDatabase, type OpenReader } from './db.ts';
 import type { ReplicaClient } from './replica-client.ts';
 import { SnapshotLevel } from './replica-client.ts';
 import {
@@ -298,12 +298,18 @@ export class Replica {
   private leaseCurrent: Lease | null = null;
   private leaseTimer: NodeJS.Timeout | null = null;
   private runActive = false;
+  private openReader: OpenReader | undefined;
 
   constructor(
     path: string,
     client: ReplicaClient,
     logger: Logger = noopLogger,
-    options: { maxLevel?: number; compactionLevels?: CompactionLevels; leaser?: Leaser } = {},
+    options: {
+      maxLevel?: number;
+      compactionLevels?: CompactionLevels;
+      leaser?: Leaser;
+      openReader?: OpenReader;
+    } = {},
   ) {
     this.path = path;
     this.client = client;
@@ -319,6 +325,7 @@ export class Replica {
       // follower until {@link run} (or an explicit acquire) makes it primary.
       this.leasePrimary = false;
     }
+    this.openReader = options.openReader;
   }
 
   /** Leaser optionally bounds this replica to a single primary across hosts. */
@@ -370,7 +377,7 @@ export class Replica {
   /** Lazily opens the local database reader (cached). */
   private async localDb(): Promise<LocalDatabase> {
     if (this.db === null) {
-      this.db = await LocalDatabase.open(this.path);
+      this.db = await LocalDatabase.open(this.path, this.openReader);
     }
     return this.db;
   }
