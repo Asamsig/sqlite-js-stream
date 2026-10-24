@@ -192,11 +192,17 @@ export class LocalDatabase {
   /**
    * Pins a WAL snapshot by starting a read transaction and issuing a read that
    * touches the database (a plain `SELECT 1` does not acquire the WAL read lock).
+   * Rolls back if the read fails, so the next sync can start a new transaction.
    */
   private beginRead(): void {
     const conn = this.ensureConn();
     conn.exec('BEGIN');
-    conn.prepare('SELECT count(*) FROM sqlite_master').get();
+    try {
+      conn.prepare('SELECT count(*) FROM sqlite_master').get();
+    } catch (err) {
+      conn.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   /** Releases the pinned read snapshot. */

@@ -7,7 +7,7 @@ import { FileReplicaClient, Replica, type ReaderConnection } from '../../src/ind
 import { createWALDB, makeTempDir } from '../helpers/make-db.ts';
 
 /** Wraps a read-only node:sqlite connection, recording how it is used. */
-function trackingReader(path: string, calls: string[]): ReaderConnection {
+function trackingReader(path: string, calls: string[], failReads = 0): ReaderConnection {
   const conn = new DatabaseSync(path, { readOnly: true });
   return {
     exec(sql) {
@@ -16,7 +16,16 @@ function trackingReader(path: string, calls: string[]): ReaderConnection {
     },
     prepare(sql) {
       calls.push(`prepare:${sql}`);
-      return conn.prepare(sql);
+      const stmt = conn.prepare(sql);
+      return {
+        get() {
+          if (sql.includes('sqlite_master') && failReads > 0) {
+            failReads--;
+            throw new Error('simulated read failure');
+          }
+          return stmt.get();
+        },
+      };
     },
     close() {
       calls.push('close');
@@ -59,4 +68,26 @@ test('openReader: the supplied connection pins sync snapshots', async () => {
   }
 
   assert.equal(calls.at(-1), 'close', 'replica.close() closes the reader');
+});
+
+test('a failed pinning read does not leave the read transaction open', async () => {
+  const t = createWALDB(['a', 'b', 'c']);
+  const client = new FileReplicaClient(makeTempDir('repl-'));
+  const calls: string[] = [];
+  const replica = new Replica(t.path, client, undefined, {
+    openReader: (path) => trackingReader(path, calls, 1),
+  });
+
+  try {
+    await assert.rejects(replica.sync(), /simulated read failure/);
+    assert.ok(calls.includes('exec:ROLLBACK'));
+
+    // The next sync must start a fresh transaction rather than fail with
+    // "cannot start a transaction within a transaction".
+    const info = await replica.sync();
+    assert.equal(info?.minTXID, 1n);
+  } finally {
+    replica.close();
+    t.close();
+  }
 });
